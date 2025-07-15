@@ -1,0 +1,17 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+
+# Zig test output
+test-output.txt
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*.bak
+.idea/
+.vscode/

@@ -1,0 +1,12 @@
+
+
+r1: p1 -(ra1 ra2 / rb)-> p2;
+r2: p2 g1 +> p3 g2 g1;
+r3: p3 g2 -> p3 g2;
+r4: p3 g2 +> p4;
+r5: p4 g1 -> p4 g1;
+
+ra1: p1 g1 -> pe g1;
+ra2: p1 g1 -> p2;
+rb: p2 g1 -> p2 g1;
+
