@@ -630,9 +630,11 @@ pub const SM_GBPDS_Processor = struct {
     symbol_names: std.AutoArrayHashMap(Symbol, SymbolName),
 
     rule_set: std.AutoArrayHashMap(Rule, void),
-    accept_atoms: []std.AutoArrayHashMap(AtomName, void),
+    accept_atoms: []std.AutoArrayHashMap(AtomName, AcceptType),
 
     sm_pds_proc: ?*const processor.SM_PDS_Processor,
+
+    pub const AcceptType = enum { any, unexit };
 
     pub fn init(gpa: std.mem.Allocator, arena: std.mem.Allocator) SM_GBPDS_Processor {
         return SM_GBPDS_Processor{
@@ -929,7 +931,7 @@ pub const SM_GBPDS_Processor = struct {
         };
     }
 
-    pub fn constructAcceptAtoms(self: @This(), atoms: []const Atom) ![]std.AutoArrayHashMap(AtomName, void) {
+    pub fn constructAcceptAtoms(self: @This(), atoms: []const Atom) ![]std.AutoArrayHashMap(AtomName, AcceptType) {
         const gpa = self.gpa;
         var u_ops = std.ArrayList(Formula).init(gpa);
         defer u_ops.deinit();
@@ -945,17 +947,22 @@ pub const SM_GBPDS_Processor = struct {
                 else => {},
             }
         }
-        const accept_atoms = try gpa.alloc(std.AutoArrayHashMap(AtomName, void), u_ops.items.len);
+        const accept_atoms = try gpa.alloc(std.AutoArrayHashMap(AtomName, AcceptType), u_ops.items.len);
         for (u_ops.items, 0..) |op, i| {
-            accept_atoms[i] = std.AutoArrayHashMap(AtomName, void).init(gpa);
+            accept_atoms[i] = std.AutoArrayHashMap(AtomName, AcceptType).init(gpa);
             const right_op = switch (op) {
                 .ug => |n| n.right,
                 .ua => |n| n.right,
                 else => unreachable,
             };
+            const acc_type = switch (op) {
+                .ug => AcceptType.any,
+                .ua => AcceptType.unexit,
+                else => unreachable,
+            };
             for (atoms) |*a| {
                 if (!a.set.contains(op) or a.set.contains(right_op)) {
-                    try accept_atoms[i].put(a, {});
+                    try accept_atoms[i].put(a, acc_type);
                 }
             }
         }
@@ -1084,8 +1091,10 @@ pub const SM_GBPDS_Processor = struct {
     fn simplifyStep(self: *@This(), inits: []const StateName) !u32 {
         var deleted: u32 = 0;
 
-        var ret_sym_used = std.AutoHashMap(RetSymbol, void).init(self.gpa);
-        defer ret_sym_used.deinit();
+        var ret_sym_pushed = std.AutoHashMap(RetSymbol, void).init(self.gpa);
+        defer ret_sym_pushed.deinit();
+        var ret_sym_read = std.AutoHashMap(RetSymbol, void).init(self.gpa);
+        defer ret_sym_read.deinit();
 
         for (self.rule_set.keys()) |rule| {
             switch (rule) {
@@ -1093,10 +1102,16 @@ pub const SM_GBPDS_Processor = struct {
                     if (r.new_tail) |tail| {
                         switch (tail.*) {
                             .ret => |top| {
-                                try ret_sym_used.put(top, {});
+                                try ret_sym_pushed.put(top, {});
                             },
                             .standard => {},
                         }
+                    }
+                    switch (r.top.*) {
+                        .ret => |top| {
+                            try ret_sym_read.put(top, {});
+                        },
+                        .standard => {},
                     }
                 },
                 .sm => {},
@@ -1139,11 +1154,21 @@ pub const SM_GBPDS_Processor = struct {
                     } else {
                         switch (r.top.*) {
                             .ret => |t| {
-                                if (!ret_sym_used.contains(t)) {
+                                if (!ret_sym_pushed.contains(t)) {
                                     try to_del.append(rule);
                                 }
                             },
                             .standard => {},
+                        }
+                        if (r.new_tail) |tail| {
+                            switch (tail.*) {
+                                .ret => |top| {
+                                    if (!ret_sym_read.contains(top)) {
+                                        try to_del.append(rule);
+                                    }
+                                },
+                                .standard => {},
+                            }
                         }
                     }
                 },
@@ -1364,7 +1389,7 @@ test "sm-gbpds construction" {
         std.testing.allocator.free(atoms);
     }
 
-    var lambda = try processor.LabellingFunction.init(std.testing.allocator, &proc, formula);
+    var lambda = try processor.LabellingFunction.init(std.testing.allocator, &proc, formula, processor.LabellingFunction.strict);
     defer lambda.deinit();
 
     try gbpds.construct(&proc, atoms, lambda);

@@ -87,7 +87,8 @@ pub const SM_BPDS_Processor = struct {
             return state.label == .unexit;
         } else {
             const atoms = self.sm_gbpds.accept_atoms[i - 1];
-            return atoms.contains(state.atom);
+            const acc_type = atoms.get(state.atom) orelse return false;
+            return (acc_type != .unexit) or state.label == .unexit;
         }
     }
 

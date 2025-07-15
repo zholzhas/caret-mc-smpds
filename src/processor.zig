@@ -148,7 +148,9 @@ pub const SymbolProcessor = struct {
 pub const LabellingFunction = struct {
     state_aps: std.AutoArrayHashMap(State, std.StringArrayHashMap(void)),
 
-    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, formula: Caret.Formula) !LabellingFunction {
+    pub const Labeller = *const fn ([]const u8, []const u8) bool;
+
+    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, formula: Caret.Formula, func: Labeller) !LabellingFunction {
         var state_names = std.AutoHashMap(State, []const u8).init(gpa);
         defer state_names.deinit();
         var state_aps = std.AutoArrayHashMap(State, std.StringArrayHashMap(void)).init(gpa);
@@ -158,7 +160,7 @@ pub const LabellingFunction = struct {
             try state_aps.put(proc.states.state_map.get(name).?, std.StringArrayHashMap(void).init(gpa));
         }
 
-        try fillAps(&state_aps, formula, state_names);
+        try fillAps(&state_aps, formula, state_names, func);
 
         return LabellingFunction{
             .state_aps = state_aps,
@@ -172,44 +174,69 @@ pub const LabellingFunction = struct {
         self.state_aps.deinit();
     }
 
-    pub fn fillAps(state_aps: *std.AutoArrayHashMap(State, std.StringArrayHashMap(void)), formula: Caret.Formula, state_names: std.AutoHashMap(State, []const u8)) !void {
+    pub const strict: Labeller = struct {
+        pub fn cmp(ap: []const u8, control_point: []const u8) bool {
+            return std.mem.eql(u8, ap, control_point);
+        }
+    }.cmp;
+
+    pub const substr: Labeller = struct {
+        pub fn cmp(ap: []const u8, control_point: []const u8) bool {
+            return std.mem.indexOf(u8, control_point, ap);
+        }
+    }.cmp;
+
+    pub const naive: Labeller = struct {
+        pub fn cmp(ap: []const u8, control_point: []const u8) bool {
+            const delim = std.mem.lastIndexOf(u8, control_point, "#").?;
+            // std.debug.print("Comparing {s} and {s}: {}\n", .{ ap, control_point, std.mem.eql(u8, control_point[0..delim], ap) });
+            return std.mem.eql(u8, control_point[0..delim], ap);
+        }
+    }.cmp;
+
+    pub fn fillAps(
+        state_aps: *std.AutoArrayHashMap(State, std.StringArrayHashMap(void)),
+        formula: Caret.Formula,
+        state_names: std.AutoHashMap(State, []const u8),
+        func: Labeller,
+    ) !void {
         switch (formula) {
             .at => |at| {
                 for (state_aps.keys()) |s| {
                     const name = state_names.get(s).?;
-                    if (std.mem.eql(u8, at.name, name)) {
-                        try state_aps.getPtr(s).?.put(name, {});
+                    if (func(at.name, name)) {
+                        try state_aps.getPtr(s).?.put(at.name, {});
                     }
                 }
             },
             .top, .bot, .trans => {},
             .lnot => |n| {
-                try fillAps(state_aps, n.neg, state_names);
+                try fillAps(state_aps, n.neg, state_names, func);
             },
             .lor => |n| {
-                try fillAps(state_aps, n.left, state_names);
-                try fillAps(state_aps, n.right, state_names);
+                try fillAps(state_aps, n.left, state_names, func);
+                try fillAps(state_aps, n.right, state_names, func);
             },
             .xg => |n| {
-                try fillAps(state_aps, n.next, state_names);
+                try fillAps(state_aps, n.next, state_names, func);
             },
             .xa => |n| {
-                try fillAps(state_aps, n.next, state_names);
+                try fillAps(state_aps, n.next, state_names, func);
             },
             .xc => |n| {
-                try fillAps(state_aps, n.next, state_names);
+                try fillAps(state_aps, n.next, state_names, func);
             },
             .ug => |n| {
-                try fillAps(state_aps, n.left, state_names);
-                try fillAps(state_aps, n.right, state_names);
+                try fillAps(state_aps, n.left, state_names, func);
+                try fillAps(state_aps, n.right, state_names, func);
             },
             .ua => |n| {
-                try fillAps(state_aps, n.left, state_names);
-                try fillAps(state_aps, n.right, state_names);
+                try fillAps(state_aps, n.left, state_names, func);
+                try fillAps(state_aps, n.right, state_names, func);
             },
             .uc => |n| {
-                try fillAps(state_aps, n.left, state_names);
-                try fillAps(state_aps, n.right, state_names);
+                try fillAps(state_aps, n.left, state_names, func);
+                try fillAps(state_aps, n.right, state_names, func);
             },
         }
     }
@@ -264,6 +291,9 @@ pub const SM_PDS_Processor = struct {
     pub fn deinit(self: *@This()) void {
         self.phase_combiner.deinit();
         self.phases.deinit();
+        if (self.system) |*s| {
+            s.rules.deinit();
+        }
     }
 
     pub fn process_state(self: *@This(), state: []const u8) !State {
@@ -294,7 +324,7 @@ pub const SM_PDS_Processor = struct {
     };
 
     pub fn process(self: *@This(), smpds: Unprocessed.SM_PDS, init_conf: Unprocessed.Conf) !void {
-        var rules = std.AutoArrayHashMap(RuleName, Rule).init(self.arena);
+        var rules = std.AutoArrayHashMap(RuleName, Rule).init(self.gpa);
 
         for (smpds.rules) |rule| {
             const processed_rule: Rule = switch (rule.typ) {

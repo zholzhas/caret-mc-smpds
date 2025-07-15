@@ -7,6 +7,25 @@ pub const Conf = struct {
     state: []const u8,
     stack: []const []const u8,
     phase: []const []const u8,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        try writer.print("{s} ", .{self.state});
+        for (self.stack) |sym| {
+            try writer.print("{s} ", .{sym});
+        }
+        try writer.print("# ", .{});
+        for (self.phase) |sym| {
+            try writer.print("{s} ", .{sym});
+        }
+    }
 };
 
 pub const Rule = struct {
@@ -30,11 +49,11 @@ pub const Rule = struct {
             std.fmt.invalidFmtError(fmt, self);
         }
         return switch (self.typ) {
-            RuleType.internal => writer.print("{s} {s} \\--> {s} {s} {s}", .{ self.from, self.top.?, self.to, self.new_top orelse "-", self.new_tail orelse "-" }),
-            RuleType.call => writer.print("{s} {s} \\-call-> {s} {s} {s}", .{ self.from, self.top.?, self.to, self.new_top.?, self.new_tail.? }),
-            RuleType.ret => writer.print("{s} {s} \\-ret-> {s}", .{ self.from, self.top.?, self.to }),
+            RuleType.internal => writer.print("{s}: {s} {s} \\--> {s} {s} {s}", .{ self.name, self.from, self.top.?, self.to, self.new_top orelse "-", self.new_tail orelse "-" }),
+            RuleType.call => writer.print("{s}: {s} {s} \\-call-> {s} {s} {s}", .{ self.name, self.from, self.top.?, self.to, self.new_top.?, self.new_tail.? }),
+            RuleType.ret => writer.print("{s}: {s} {s} \\-ret-> {s}", .{ self.name, self.from, self.top.?, self.to }),
             RuleType.sm => {
-                try writer.print("{s} \\--(", .{self.from});
+                try writer.print("{s}: {s} \\--(", .{ self.name, self.from });
                 for (self.sm_l.?, 0..) |r, i| {
                     if (i > 0) {
                         try writer.print(", ", .{});
@@ -752,7 +771,7 @@ pub const ParsedSMPDS = struct {
     smpds: SM_PDS,
 };
 
-fn lt(_: void, lhs: []const u8, rhs: []const u8) bool {
+pub fn lt(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
@@ -1046,7 +1065,7 @@ test "unprocessed printing" {
         };
         _ = &r1;
         const str = try std.fmt.allocPrint(allocator, "{}", .{r1});
-        const test_str = "p1 g1 \\--> p2 g2 -";
+        const test_str = "r1: p1 g1 \\--> p2 g2 -";
         try std.testing.expectEqualStrings(str, test_str);
     }
 
@@ -1062,7 +1081,7 @@ test "unprocessed printing" {
         };
         _ = &r1;
         const str = try std.fmt.allocPrint(allocator, "{}", .{r1});
-        const test_str = "p1 g1 \\-call-> p2 g2 g3";
+        const test_str = "r1: p1 g1 \\-call-> p2 g2 g3";
         try std.testing.expectEqualStrings(str, test_str);
     }
 
@@ -1077,7 +1096,7 @@ test "unprocessed printing" {
         };
         _ = &r1;
         const str = try std.fmt.allocPrint(allocator, "{}", .{r1});
-        const test_str = "p1 \\--(r1)-/-(r1, r2, r3)--> p2";
+        const test_str = "r1: p1 \\--(r1)-/-(r1, r2, r3)--> p2";
         try std.testing.expectEqualStrings(str, test_str);
     }
 }

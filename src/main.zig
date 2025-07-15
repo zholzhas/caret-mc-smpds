@@ -8,12 +8,8 @@ const std = @import("std");
 
 const debug = false;
 
+var pytest: bool = false;
 var naive: bool = false;
-var mem_check: bool = false;
-var is_json: bool = false;
-var substr_ap: bool = false;
-var progress: ?std.Progress.Node = null;
-var hang = false;
 
 fn parse_args(args: [][:0]u8) void {
     for (args[2..]) |arg| {
@@ -25,43 +21,12 @@ fn parse_args(args: [][:0]u8) void {
             }
         }
         const arg_stripped = arg[strip_ind..];
-        if (std.mem.eql(u8, arg_stripped, "dpn")) {
-            naive = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg_stripped, "mem")) {
-            mem_check = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg_stripped, "json")) {
-            is_json = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg_stripped, "hang")) {
-            hang = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg_stripped, "nohang")) {
-            hang = false;
-            continue;
-        }
-        if (std.mem.eql(u8, arg_stripped, "substr")) {
-            substr_ap = true;
-            continue;
-        }
         if (std.mem.eql(u8, arg_stripped, "pytest")) {
-            substr_ap = false;
-            is_json = true;
-            mem_check = true;
+            pytest = true;
             continue;
         }
-        if (std.mem.eql(u8, arg_stripped, "bin")) {
-            substr_ap = true;
-            is_json = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg_stripped, "progress")) {
-            progress = std.Progress.start(.{});
+        if (std.mem.eql(u8, arg_stripped, "naive")) {
+            naive = true;
             continue;
         }
         std.log.err("Unknown argument {s}\n", .{arg_stripped});
@@ -69,6 +34,15 @@ fn parse_args(args: [][:0]u8) void {
 }
 
 const RlimitError = error{FailedToSetRlimit};
+
+pub const GlobalState = struct {
+    timer: *std.time.Timer,
+    errors: []const u8,
+
+    arena: *std.heap.ArenaAllocator,
+};
+
+pub var state: GlobalState = undefined;
 
 pub fn main() !void {
     const limit = std.os.linux.rlimit{
@@ -83,14 +57,19 @@ pub fn main() !void {
     var timer = try std.time.Timer.start();
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
+
+    state = GlobalState{
+        .timer = &timer,
+        .arena = &arena,
+        .errors = &.{},
+    };
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     _ = &gpa;
     _ = &timer;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try std.process.argsAlloc(arena.allocator());
+    defer std.process.argsFree(arena.allocator(), args);
 
     parse_args(args);
 
@@ -99,49 +78,48 @@ pub fn main() !void {
         return error.OtherError;
     }
 
-    // const parsed = if (is_json) try reader.parseJsonFromPython(allocator, args[1]) else try parse_smdpn_file(allocator, args[1]);
-    // var strat: reader.APStrategy = undefined;
-    // if (naive and substr_ap) {
-    //     strat = .naive_substr;
-    // } else if (naive and !substr_ap) {
-    //     strat = .naive;
-    // } else if (substr_ap) {
-    //     strat = .substr;
-    // } else {
-    //     strat = .eql;
-    // }
+    var result: bool = undefined;
+    if (pytest) {
+        if (naive) {
+            result = caret_model_check_pytest_naive(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+                print_errors(e);
+                break :blk false;
+            };
+        } else {
+            result = caret_model_check_pytest(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+                print_errors(e);
+                break :blk false;
+            };
+        }
+    } else {
+        result = caret_model_check_smpds_file(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+            print_errors(e);
+            break :blk false;
+        };
+    }
 
-    // defer if (progress) |p| p.end();
+    const stdout = std.io.getStdOut().writer();
 
-    // const res = ctl_model_check(gpa.allocator(), parsed, strat, naive, progress) catch |e| {
-    //     std.log.err("OOM", .{});
+    try stdout.print("{s}\n", .{if (result) "True" else "False"});
 
-    //     const f_time: f64 = @floatFromInt(timer.lap());
-    //     const f_mem: f64 = @floatFromInt(arena.queryCapacity());
-    //     std.log.err("Memory used: {d:.3} KB", .{f_mem / 1024});
-    //     std.log.err("Time took: {d:.3}s", .{f_time / 1000000000});
-    //     return e;
-    // };
-
-    // const stdout = std.io.getStdOut().writer();
-
-    // try stdout.print("{s}\n", .{if (res) "True" else "False"});
-    // if (mem_check) {
-    //     const f_time: f64 = @floatFromInt(timer.lap());
-    //     const f_mem: f64 = @floatFromInt(arena.queryCapacity());
-    //     try stdout.print("Memory used: {d:.3} KB\n", .{f_mem / 1024});
-    //     try stdout.print("Time took: {d:.3}s\n", .{f_time / 1000000000});
-    // }
-
-    // if (hang) {
-    //     const stdin = std.io.getStdIn().reader();
-
-    //     try stdout.print("{{END}}\n", .{});
-    //     _ = try stdin.readByte();
-    // }
+    if (pytest) {
+        const f_time: f64 = @floatFromInt(timer.lap());
+        const f_mem: f64 = @floatFromInt(arena.queryCapacity());
+        try stdout.print("Memory used: {d:.3} KB\n", .{f_mem / 1024});
+        try stdout.print("Time took: {d:.3}s\n", .{f_time / 1000000000});
+    }
 }
 
-pub fn parse_smdpn_file(allocator: std.mem.Allocator, filename: []const u8) !parser.ParsedSMPDS {
+pub fn print_errors(_: anyerror) void {
+    std.log.err("OOM", .{});
+
+    const f_time: f64 = @floatFromInt(state.timer.lap());
+    const f_mem: f64 = @floatFromInt(state.arena.queryCapacity());
+    std.log.err("Memory used: {d:.3} KB", .{f_mem / 1024});
+    std.log.err("Time took: {d:.3}s", .{f_time / 1000000000});
+}
+
+pub fn parse_smpds_file(allocator: std.mem.Allocator, filename: []const u8) !parser.ParsedSMPDS {
     var file = parser.SmpdsFile.open(allocator, filename);
     const unprocessed_conf = try file.parse();
     return unprocessed_conf;
@@ -153,6 +131,7 @@ pub fn caret_model_check(
     proc: *processor.SM_PDS_Processor,
     conf: processor.Conf,
     formula: processor.Caret.Formula,
+    lambda: processor.LabellingFunction,
 ) !bool {
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
     defer gbpds.deinit();
@@ -172,9 +151,6 @@ pub fn caret_model_check(
         }
         gpa.free(atoms);
     }
-
-    var lambda = try processor.LabellingFunction.init(gpa, proc, formula);
-    defer lambda.deinit();
 
     try gbpds.construct(proc, atoms, lambda);
 
@@ -265,20 +241,188 @@ pub fn caret_model_check(
     return res;
 }
 
-pub fn caret_model_check_file(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator, unprocessed_conf: parser.ParsedSMPDS, lfunc: processor.LabellingFunction.Labeller) !bool {
     var proc = processor.SM_PDS_Processor.init(arena, gpa);
     defer proc.deinit();
 
-    var file = parser.SmpdsFile.open(arena, filename);
-
-    const unprocessed_conf = try file.parse();
     const unprocessed = unprocessed_conf.smpds;
     try proc.process(unprocessed, unprocessed_conf.init);
     const conf = try proc.getInit(unprocessed_conf.init);
 
     const formula = try processor.processCaret(arena, unprocessed_conf.caret);
 
-    return caret_model_check(gpa, arena, &proc, conf, formula);
+    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc);
+    defer lambda.deinit();
+
+    return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
+}
+
+pub fn caret_model_check_smpds_file(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    var file = parser.SmpdsFile.open(arena, filename);
+    const unprocessed_conf = try file.parse();
+
+    return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.strict);
+}
+
+pub fn caret_model_check_pytest(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
+
+    return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.strict);
+}
+
+pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    var file = parser.SmpdsFile.open(arena, filename);
+    const unprocessed_conf = try file.parse();
+    var proc = processor.SM_PDS_Processor.init(arena, gpa);
+
+    defer proc.deinit();
+
+    const unprocessed = unprocessed_conf.smpds;
+    try proc.process(unprocessed, unprocessed_conf.init);
+    _ = try proc.getInit(unprocessed_conf.init);
+
+    const pds = try translate_to_naive(gpa, arena, &proc, unprocessed_conf);
+    var pds_proc = processor.SM_PDS_Processor.init(arena, gpa);
+    defer pds_proc.deinit();
+
+    try pds_proc.process(pds.smpds, pds.init);
+    const pds_conf = try pds_proc.getInit(pds.init);
+
+    const formula = try processor.processCaret(arena, pds.caret);
+
+    var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive);
+    defer lambda.deinit();
+
+    return caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+}
+
+pub fn caret_model_check_pytest_naive(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
+    var proc = processor.SM_PDS_Processor.init(arena, gpa);
+
+    defer proc.deinit();
+
+    const unprocessed = unprocessed_conf.smpds;
+    try proc.process(unprocessed, unprocessed_conf.init);
+    _ = try proc.getInit(unprocessed_conf.init);
+
+    const pds = try translate_to_naive(gpa, arena, &proc, unprocessed_conf);
+    var pds_proc = processor.SM_PDS_Processor.init(arena, gpa);
+    defer pds_proc.deinit();
+
+    try pds_proc.process(pds.smpds, pds.init);
+    const pds_conf = try pds_proc.getInit(pds.init);
+
+    const formula = try processor.processCaret(arena, pds.caret);
+
+    var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive);
+    defer lambda.deinit();
+
+    return caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+}
+
+pub fn translate_to_naive(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    proc: *processor.SM_PDS_Processor,
+    unprocessed_conf: parser.ParsedSMPDS,
+) !parser.ParsedSMPDS {
+    var rules = std.ArrayList(parser.Rule).init(gpa);
+    defer rules.deinit();
+
+    const init_phase_name = try proc.process_phase(unprocessed_conf.init.phase);
+
+    var res_init_phase = std.ArrayList([]const u8).init(gpa);
+    defer res_init_phase.deinit();
+
+    for (proc.phases.keys()) |phase_name| {
+        const phase = proc.phase_names.phase_values.get(phase_name).?;
+        rule_loop: for (unprocessed_conf.smpds.rules) |rule| {
+            const r_name = proc.rule_names.rule_map.get(rule.name).?;
+            if (phase.items.contains(r_name)) {
+                switch (rule.typ) {
+                    .sm => {
+                        const old_phase = try proc.process_phase(rule.sm_l.?);
+                        const new_phase = try proc.process_phase(rule.sm_r.?);
+                        const res_phase = proc.phase_combiner.get(.{
+                            .original_phase = phase_name,
+                            .to_add = new_phase,
+                            .to_remove = old_phase,
+                        }) orelse continue :rule_loop;
+
+                        for (unprocessed_conf.smpds.alphabet) |top| {
+                            const lab = try std.fmt.allocPrint(arena, "{}", .{rules.items.len});
+                            const new_rule = parser.Rule{
+                                .from = try std.fmt.allocPrint(arena, "{s}#{}", .{ rule.from, phase_name }),
+                                .to = try std.fmt.allocPrint(arena, "{s}#{}", .{ rule.to, res_phase }),
+                                .name = lab,
+                                .top = top,
+                                .new_top = top,
+                                .typ = .internal,
+                            };
+                            try rules.append(new_rule);
+                            try res_init_phase.append(lab);
+                        }
+                    },
+                    .call, .internal, .ret => {
+                        const lab = try std.fmt.allocPrint(arena, "{}", .{rules.items.len});
+                        const new_rule = parser.Rule{
+                            .from = try std.fmt.allocPrint(arena, "{s}#{}", .{ rule.from, phase_name }),
+                            .to = try std.fmt.allocPrint(arena, "{s}#{}", .{ rule.to, phase_name }),
+                            .name = lab,
+                            .top = rule.top.?,
+                            .new_top = rule.new_top,
+                            .new_tail = rule.new_tail,
+                            .typ = rule.typ,
+                        };
+                        try rules.append(new_rule);
+                        try res_init_phase.append(lab);
+                    },
+                }
+            }
+        }
+    }
+
+    const init_conf = parser.Conf{
+        .state = try std.fmt.allocPrint(arena, "{s}#{}", .{ unprocessed_conf.init.state, init_phase_name }),
+        .phase = try arena.dupe([]const u8, res_init_phase.items),
+        .stack = unprocessed_conf.init.stack,
+    };
+
+    var states = std.StringArrayHashMap(void).init(gpa);
+    defer states.deinit();
+    var alphabet = std.StringArrayHashMap(void).init(gpa);
+    defer alphabet.deinit();
+
+    for (rules.items) |rule| {
+        try states.put(rule.from, {});
+        try states.put(rule.to, {});
+        if (rule.top) |sym| {
+            try alphabet.put(sym, {});
+        }
+        if (rule.new_top) |sym| {
+            try alphabet.put(sym, {});
+        }
+        if (rule.new_tail) |sym| {
+            try alphabet.put(sym, {});
+        }
+    }
+    const states_sorted = try arena.dupe([]const u8, states.keys());
+    std.mem.sort([]const u8, states_sorted, {}, parser.lt);
+    const alphabet_sorted = try arena.dupe([]const u8, alphabet.keys());
+    std.mem.sort([]const u8, alphabet_sorted, {}, parser.lt);
+
+    const smpds = parser.SM_PDS{
+        .states = states_sorted,
+        .alphabet = alphabet_sorted,
+        .rules = try arena.dupe(parser.Rule, rules.items),
+    };
+
+    return parser.ParsedSMPDS{
+        .smpds = smpds,
+        .init = init_conf,
+        .caret = unprocessed_conf.caret,
+    };
 }
 
 test "whole" {
@@ -301,7 +445,7 @@ test "whole" {
             // std.debug.print("testing {s}\n", .{file.name});
             const name = file.name;
 
-            const res = try caret_model_check_file(gpa, arena.allocator(), try test_dir.realpathAlloc(arena.allocator(), file.name));
+            const res = try caret_model_check_smpds_file(gpa, arena.allocator(), try test_dir.realpathAlloc(arena.allocator(), file.name));
 
             std.testing.expectEqual(std.mem.startsWith(u8, name, "true"), res) catch |err| {
                 std.debug.print("Failed {s}\n", .{name});
@@ -311,33 +455,35 @@ test "whole" {
     }
 }
 
-// test "naive" {
-//     const gpa = std.testing.allocator;
-//     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-//     defer arena.deinit();
-//     const allocator = arena.allocator();
+test "naive" {
+    if (debug) {
+        try std.testing.expect(true);
+        return;
+    }
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
 
-//     const cwd = std.fs.cwd();
-//     const test_dir = try cwd.openDir("tests", .{
-//         .iterate = true,
-//     });
+    const cwd = std.fs.cwd();
+    const test_dir = try cwd.openDir("tests", .{
+        .iterate = true,
+    });
 
-//     var test_file_iter = test_dir.iterate();
-//     while (try test_file_iter.next()) |file| {
-//         if (file.kind == .file and std.mem.endsWith(u8, file.name, ".smdpn")) {
-//             // std.debug.print("testing {s}\n", .{file.name});
-//             const name = file.name;
+    var test_file_iter = test_dir.iterate();
+    while (try test_file_iter.next()) |file| {
+        if (file.kind == .file and std.mem.endsWith(u8, file.name, ".smpds")) {
+            // std.debug.print("testing {s}\n", .{file.name});
+            const name = file.name;
 
-//             const parsed = try parse_smdpn_file(allocator, try test_dir.realpathAlloc(allocator, file.name));
-//             const res = try ctl_model_check(gpa, parsed, .naive, true, null);
+            const res = try caret_model_check_smpds_naive(gpa, arena.allocator(), try test_dir.realpathAlloc(arena.allocator(), file.name));
 
-//             std.testing.expectEqual(std.mem.startsWith(u8, name, "true"), res) catch |err| {
-//                 std.debug.print("Failed {s}\n", .{name});
-//                 return err;
-//             };
-//         }
-//     }
-// }
+            std.testing.expectEqual(std.mem.startsWith(u8, name, "true"), res) catch |err| {
+                std.debug.print("Failed naive {s}\n", .{name});
+                return err;
+            };
+        }
+    }
+}
 
 test "dependencies" {
     _ = parser.SM_PDS;
@@ -346,7 +492,7 @@ test "dependencies" {
     _ = hr.HeadReachabilityGraph;
 }
 
-test "full" {
+test "debug" {
     if (!debug) {
         try std.testing.expect(true);
         return;
@@ -358,15 +504,28 @@ test "full" {
     defer arena_.deinit();
     const arena = arena_.allocator();
 
-    var proc = processor.SM_PDS_Processor.init(arena, std.testing.allocator);
-    defer proc.deinit();
+    var proc_ = processor.SM_PDS_Processor.init(arena, std.testing.allocator);
+    defer proc_.deinit();
 
-    var file = parser.SmpdsFile.open(arena, "examples/full_test.smpds");
+    var file = parser.SmpdsFile.open(arena, "tests/true-2.smpds");
 
     const unprocessed_conf = try file.parse();
     const unprocessed = unprocessed_conf.smpds;
-    try proc.process(unprocessed, unprocessed_conf.init);
-    const conf = try proc.getInit(unprocessed_conf.init);
+    try proc_.process(unprocessed, unprocessed_conf.init);
+    _ = try proc_.getInit(unprocessed_conf.init);
+
+    const pds = try translate_to_naive(gpa, arena, &proc_, unprocessed_conf);
+
+    for (pds.smpds.rules) |r| {
+        std.debug.print("{}\n", .{r});
+    }
+    std.debug.print("{}\n", .{pds.init});
+
+    var proc = processor.SM_PDS_Processor.init(arena, gpa);
+    defer proc.deinit();
+
+    try proc.process(pds.smpds, pds.init);
+    const conf = try proc.getInit(pds.init);
 
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
     defer gbpds.deinit();
@@ -389,8 +548,17 @@ test "full" {
         gpa.free(atoms);
     }
 
-    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula);
+    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, processor.LabellingFunction.naive);
     defer lambda.deinit();
+
+    // const aps = lambda.getAPs(conf.state);
+    // for (aps.keys()) |ap| {
+    //     std.debug.print("AP: {s}\n", .{ap});
+    // }
+    // for (atoms) |a| {
+    //     std.debug.print("{}\n", .{a});
+    //     std.debug.print("{}\n", .{a.containsAPsExactly(lambda.getAPs(conf.state))});
+    // }
 
     try gbpds.construct(&proc, atoms, lambda);
 
@@ -408,7 +576,7 @@ test "full" {
         }));
     }
 
-    try gbpds.simplify(ginits.items);
+    // try gbpds.simplify(ginits.items);
 
     var gen_printer = try gbuchi.SM_GBPDS_Printer.init(gpa, &proc);
     defer gen_printer.deinit();
