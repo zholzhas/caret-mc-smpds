@@ -83,6 +83,185 @@ const JsonError = error{
     InvalidSMRule,
 };
 
+const ParsedJson = struct {
+    system: ParsedSMPDS,
+    labels: std.StringArrayHashMap([]const []const u8),
+};
+
+pub fn parseJsonWithLabels(allocator: std.mem.Allocator, filename: []const u8) !ParsedJson {
+    var file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+
+    var reader = std.json.reader(allocator, file.reader());
+
+    const val = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &reader, .{});
+
+    const smpds = val.array.items[0];
+    var states = try allocator.alloc([]const u8, smpds.array.items[0].array.items.len);
+
+    for (smpds.array.items[0].array.items, 0..) |s, j| {
+        states[j] = try allocator.dupe(u8, s.string);
+    }
+
+    var alphabet = try allocator.alloc([]const u8, smpds.array.items[1].array.items.len);
+    for (smpds.array.items[1].array.items, 0..) |s, j| {
+        alphabet[j] = try allocator.dupe(u8, s.string);
+    }
+
+    var rules = try allocator.alloc(Rule, smpds.array.items[2].object.count() + smpds.array.items[3].object.count());
+
+    for (smpds.array.items[2].object.keys(), 0..) |name, j| {
+        const r = smpds.array.items[2].object.get(name).?.array;
+
+        if (r.items.len != 5) {
+            std.log.err("Invalid JSON provided: Rule {s} does not contains 5 elements (p.1 g.2 -> p.3 g.4 label.5)", .{name});
+            return JsonError.InvalidSMRule;
+        }
+
+        var new_top: ?[]const u8 = undefined;
+        var new_tail: ?[]const u8 = undefined;
+        if (r.items[3].string.len == 0) {
+            new_top = null;
+            new_tail = null;
+        } else {
+            if (std.mem.indexOf(u8, r.items[3].string, " ")) |ind| {
+                new_top = try allocator.dupe(u8, r.items[3].string[0..ind]);
+                new_tail = try allocator.dupe(u8, r.items[3].string[ind + 1 ..]);
+            } else {
+                new_top = try allocator.dupe(u8, r.items[3].string);
+                new_tail = null;
+            }
+        }
+
+        rules[j] = Rule{
+            .name = try allocator.dupe(u8, name),
+            .from = try allocator.dupe(u8, r.items[0].string),
+            .to = try allocator.dupe(u8, r.items[2].string),
+            .top = try allocator.dupe(u8, r.items[1].string),
+            .new_top = new_top,
+            .new_tail = new_tail,
+            .typ = if (std.mem.eql(u8, r.items[4].string, "call")) RuleType.call else if (std.mem.eql(u8, r.items[4].string, "int")) RuleType.internal else if (std.mem.eql(u8, r.items[4].string, "ret")) RuleType.ret else {
+                std.log.err("Invalid JSON provided: Rule {s} is labelled with unknown label '{s}'", .{ name, r.items[4].string });
+                return JsonError.InvalidSMRule;
+            },
+        };
+    }
+
+    for (smpds.array.items[3].object.keys(), smpds.array.items[2].object.keys().len..) |name, j| {
+        const r = smpds.array.items[3].object.get(name).?.array;
+
+        const sm_l = blk: switch (r.items[1].array.items[0]) {
+            .string => |s| {
+                break :blk try allocator.dupe([]const u8, &.{s});
+            },
+            .array => |arr| {
+                var sm_l_tmp = try allocator.alloc([]const u8, arr.items.len);
+                for (arr.items, 0..) |r_name, k| {
+                    sm_l_tmp[k] = try allocator.dupe(u8, r_name.string);
+                }
+                break :blk sm_l_tmp;
+            },
+            else => return JsonError.InvalidSMRule,
+        };
+        const sm_r = blk: switch (r.items[1].array.items[1]) {
+            .string => |s| {
+                break :blk try allocator.dupe([]const u8, &.{s});
+            },
+            .array => |arr| {
+                var sm_r_tmp = try allocator.alloc([]const u8, arr.items.len);
+                for (arr.items, 0..) |r_name, k| {
+                    sm_r_tmp[k] = try allocator.dupe(u8, r_name.string);
+                }
+                break :blk sm_r_tmp;
+            },
+            else => return JsonError.InvalidSMRule,
+        };
+
+        rules[j] = Rule{
+            .name = try allocator.dupe(u8, name),
+            .from = try allocator.dupe(u8, r.items[0].string),
+            .to = try allocator.dupe(u8, r.items[2].string),
+            .typ = RuleType.sm,
+            .sm_l = sm_l,
+            .sm_r = sm_r,
+        };
+    }
+
+    const res_smpds = SM_PDS{ .states = states, .alphabet = alphabet, .rules = rules };
+
+    const labels_val = val.array.items[1].object;
+    var labels = std.StringArrayHashMap([]const []const u8).init(allocator);
+    try labels.ensureTotalCapacity(labels_val.count());
+    for (labels_val.keys()) |s| {
+        const aps = labels_val.get(s).?;
+        const aps_arr = try allocator.alloc([]const u8, aps.array.items.len);
+        for (aps.array.items, 0..) |at, i| {
+            aps_arr[i] = try allocator.dupe(u8, at.string);
+        }
+        try labels.put(s, aps_arr);
+    }
+
+    const caret_str = val.array.items[2].string;
+    const res = try formulaRef.parse(allocator, caret_str);
+    var caret: *const RawCaret = undefined;
+    switch (res.value) {
+        .ok => |caret_raw| {
+            caret = caret_raw;
+        },
+        .err => |_| {
+            const pos = getErrorPosition(caret_str, res.index);
+            const snippet_length = @min(caret_str.len - res.index, 5);
+            std.debug.print("Parsing CTL Error at line {d}, column {d}:\n{s}...\n", .{ pos.line, pos.col, caret_str[res.index..][0..snippet_length] });
+            return CaretParseError.StringParseError;
+        },
+    }
+
+    switch (val.array.items[3]) {
+        .array => {},
+        else => {
+            std.log.err("Initial configuration is not an array\n", .{});
+            return error.StringParseError;
+        },
+    }
+
+    const init = val.array.items[3];
+    switch (init.array.items[1]) {
+        .string => {},
+        else => {
+            std.log.err("Initial configuration stack is not a whitespace-separated string\n", .{});
+            return error.StringParseError;
+        },
+    }
+    var seq = std.mem.splitSequence(u8, init.array.items[1].string, " ");
+
+    var stack = std.ArrayList([]const u8).init(allocator);
+    var itt: ?[]const u8 = seq.first();
+    while (itt) |it| {
+        try stack.append(try allocator.dupe(u8, it));
+        itt = seq.next();
+    }
+
+    var phase = try allocator.alloc([]const u8, init.array.items[2].array.items.len);
+    for (init.array.items[2].array.items, 0..) |rule, k| {
+        phase[k] = try allocator.dupe(u8, rule.string);
+    }
+
+    const res_init = Conf{
+        .state = init.array.items[0].string,
+        .stack = try stack.toOwnedSlice(),
+        .phase = phase,
+    };
+
+    return ParsedJson{
+        .system = ParsedSMPDS{
+            .smpds = res_smpds,
+            .caret = caret,
+            .init = res_init,
+        },
+        .labels = labels,
+    };
+}
+
 pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !ParsedSMPDS {
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();

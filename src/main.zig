@@ -10,6 +10,7 @@ const debug = false;
 
 var pytest: bool = false;
 var naive: bool = false;
+var bin: bool = false;
 
 fn parse_args(args: [][:0]u8) void {
     for (args[2..]) |arg| {
@@ -29,6 +30,10 @@ fn parse_args(args: [][:0]u8) void {
             naive = true;
             continue;
         }
+        if (std.mem.eql(u8, arg_stripped, "bin")) {
+            bin = true;
+            continue;
+        }
         std.log.err("Unknown argument {s}\n", .{arg_stripped});
     }
 }
@@ -40,6 +45,7 @@ pub const GlobalState = struct {
     errors: []const u8,
 
     arena: *std.heap.ArenaAllocator,
+    progress: ?std.Progress.Node,
 };
 
 pub var state: GlobalState = undefined;
@@ -62,6 +68,7 @@ pub fn main() !void {
         .timer = &timer,
         .arena = &arena,
         .errors = &.{},
+        .progress = null, //std.Progress.start(.{ .root_name = "model checking" }),
     };
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -91,6 +98,11 @@ pub fn main() !void {
                 break :blk false;
             };
         }
+    } else if (bin) {
+        result = caret_model_check_bin(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+            print_errors(e);
+            break :blk false;
+        };
     } else {
         result = caret_model_check_smpds_file(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
             print_errors(e);
@@ -136,6 +148,8 @@ pub fn caret_model_check(
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
     defer gbpds.deinit();
 
+    // var timer = try std.time.Timer.start();
+
     const closure = try formula.get_closure(gpa);
     defer {
         for (closure) |f| {
@@ -143,6 +157,8 @@ pub fn caret_model_check(
         }
         gpa.free(closure);
     }
+
+    // std.debug.print("Closure: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const atoms = try gbuchi.Atom.getAtoms(gpa, closure);
     defer {
@@ -152,7 +168,10 @@ pub fn caret_model_check(
         gpa.free(atoms);
     }
 
+    // std.debug.print("Atoms: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+
     try gbpds.construct(proc, atoms, lambda);
+    // std.debug.print("GBBPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var ginits = std.ArrayList(gbuchi.StateName).init(gpa);
     defer ginits.deinit();
@@ -169,11 +188,13 @@ pub fn caret_model_check(
     }
 
     try gbpds.simplify(ginits.items);
+    // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var smb = sm_bpds.SM_BPDS_Processor.init(gpa, arena, &gbpds);
     defer smb.deinit();
 
     try smb.construct();
+    // std.debug.print("SM-BPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var binits = std.ArrayList(sm_bpds.StateName).init(gpa);
     defer binits.deinit();
@@ -193,16 +214,19 @@ pub fn caret_model_check(
     }
 
     try smb.simplify(binits.items);
+    // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var ma = sm_bpds.MA.init(arena, gpa);
     defer ma.deinit();
 
     try ma.saturate(&smb, false);
+    // std.debug.print("HR MA: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var hrg = hr.HeadReachabilityGraph.init(arena, gpa, &ma, &smb);
     defer hrg.deinit();
 
     try hrg.construct();
+    // std.debug.print("HRG: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const sccs = try hrg.findRepeatingHeads(gpa);
     defer {
@@ -211,6 +235,7 @@ pub fn caret_model_check(
         }
         gpa.free(sccs);
     }
+    // std.debug.print("Tarjan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var hr_ma = sm_bpds.MA.init(arena, gpa);
     defer hr_ma.deinit();
@@ -218,6 +243,7 @@ pub fn caret_model_check(
     try hr.build_hr_pre(&hr_ma, sccs);
 
     try hr_ma.saturate(&smb, true);
+    // std.debug.print("Pre(HG): {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const smb_init_word = try arena.alloc(sm_bpds.SymbolName, conf.stack.len);
 
@@ -238,8 +264,11 @@ pub fn caret_model_check(
             .phase = conf.phase,
         } }, smb_init_word);
     }
+    // std.debug.print("Inits: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
     return res;
 }
+
+// Different functions for model checking files depending on the input format:
 
 pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator, unprocessed_conf: parser.ParsedSMPDS, lfunc: processor.LabellingFunction.Labeller) !bool {
     var proc = processor.SM_PDS_Processor.init(arena, gpa);
@@ -264,6 +293,26 @@ pub fn caret_model_check_smpds_file(gpa: std.mem.Allocator, arena: std.mem.Alloc
     return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.strict);
 }
 
+pub fn caret_model_check_bin(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    const unprocessed_json = try parser.parseJsonWithLabels(arena, filename);
+    const unprocessed_conf = unprocessed_json.system;
+
+    var proc = processor.SM_PDS_Processor.init(arena, gpa);
+
+    defer proc.deinit();
+
+    const unprocessed = unprocessed_conf.smpds;
+    try proc.process(unprocessed, unprocessed_conf.init);
+    const conf = try proc.getInit(unprocessed_conf.init);
+
+    const formula = try processor.processCaret(arena, unprocessed_conf.caret);
+
+    var lambda = try processor.LabellingFunction.initFromLabels(gpa, &proc, unprocessed_json.labels);
+    defer lambda.deinit();
+
+    return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
+}
+
 pub fn caret_model_check_pytest(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
     const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
 
@@ -271,6 +320,8 @@ pub fn caret_model_check_pytest(gpa: std.mem.Allocator, arena: std.mem.Allocator
 }
 
 pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    var timer = try std.time.Timer.start();
+
     var file = parser.SmpdsFile.open(arena, filename);
     const unprocessed_conf = try file.parse();
     var proc = processor.SM_PDS_Processor.init(arena, gpa);
@@ -281,9 +332,13 @@ pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allo
     try proc.process(unprocessed, unprocessed_conf.init);
     _ = try proc.getInit(unprocessed_conf.init);
 
+    _ = timer.lap();
+
     const pds = try translate_to_naive(gpa, arena, &proc, unprocessed_conf);
     var pds_proc = processor.SM_PDS_Processor.init(arena, gpa);
     defer pds_proc.deinit();
+
+    // std.debug.print("Naive: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     try pds_proc.process(pds.smpds, pds.init);
     const pds_conf = try pds_proc.getInit(pds.init);
@@ -293,10 +348,15 @@ pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allo
     var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive);
     defer lambda.deinit();
 
-    return caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+    const res = try caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+
+    // std.debug.print("Total: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    return res;
 }
 
 pub fn caret_model_check_pytest_naive(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+    var timer = try std.time.Timer.start();
+
     const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
     var proc = processor.SM_PDS_Processor.init(arena, gpa);
 
@@ -306,7 +366,12 @@ pub fn caret_model_check_pytest_naive(gpa: std.mem.Allocator, arena: std.mem.All
     try proc.process(unprocessed, unprocessed_conf.init);
     _ = try proc.getInit(unprocessed_conf.init);
 
+    _ = timer.lap();
+
     const pds = try translate_to_naive(gpa, arena, &proc, unprocessed_conf);
+
+    std.debug.print("Naive: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+
     var pds_proc = processor.SM_PDS_Processor.init(arena, gpa);
     defer pds_proc.deinit();
 
@@ -318,7 +383,10 @@ pub fn caret_model_check_pytest_naive(gpa: std.mem.Allocator, arena: std.mem.All
     var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive);
     defer lambda.deinit();
 
-    return caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+    const res = try caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+
+    std.debug.print("Total: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    return res;
 }
 
 pub fn translate_to_naive(
@@ -507,25 +575,42 @@ test "debug" {
     var proc_ = processor.SM_PDS_Processor.init(arena, std.testing.allocator);
     defer proc_.deinit();
 
-    var file = parser.SmpdsFile.open(arena, "tests/true-2.smpds");
+    var file = parser.SmpdsFile.open(arena, "tests/true.test");
 
     const unprocessed_conf = try file.parse();
     const unprocessed = unprocessed_conf.smpds;
     try proc_.process(unprocessed, unprocessed_conf.init);
-    _ = try proc_.getInit(unprocessed_conf.init);
+    const conf_ = try proc_.getInit(unprocessed_conf.init);
 
-    const pds = try translate_to_naive(gpa, arena, &proc_, unprocessed_conf);
+    // NAIVE
 
-    for (pds.smpds.rules) |r| {
-        std.debug.print("{}\n", .{r});
-    }
-    std.debug.print("{}\n", .{pds.init});
+    // _ = conf_;
 
-    var proc = processor.SM_PDS_Processor.init(arena, gpa);
-    defer proc.deinit();
+    // const pds = try translate_to_naive(gpa, arena, &proc_, unprocessed_conf);
 
-    try proc.process(pds.smpds, pds.init);
-    const conf = try proc.getInit(pds.init);
+    // for (pds.smpds.rules) |r| {
+    //     std.debug.print("{}\n", .{r});
+    // }
+    // std.debug.print("{}\n", .{pds.init});
+
+    // var proc = processor.SM_PDS_Processor.init(arena, gpa);
+    // defer proc.deinit();
+
+    // try proc.process(pds.smpds, pds.init);
+    // const conf = try proc.getInit(pds.init);
+
+    // const lab_func = processor.LabellingFunction.naive;
+
+    // ----
+
+    // OPTIMIZED
+
+    var proc = proc_;
+
+    const conf = conf_;
+    const lab_func = processor.LabellingFunction.strict;
+
+    // ----
 
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
     defer gbpds.deinit();
@@ -548,7 +633,7 @@ test "debug" {
         gpa.free(atoms);
     }
 
-    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, processor.LabellingFunction.naive);
+    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lab_func);
     defer lambda.deinit();
 
     // const aps = lambda.getAPs(conf.state);
@@ -576,7 +661,7 @@ test "debug" {
         }));
     }
 
-    // try gbpds.simplify(ginits.items);
+    try gbpds.simplify(ginits.items);
 
     var gen_printer = try gbuchi.SM_GBPDS_Printer.init(gpa, &proc);
     defer gen_printer.deinit();

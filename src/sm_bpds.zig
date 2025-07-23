@@ -155,15 +155,18 @@ pub const SM_BPDS_Processor = struct {
     }
 
     pub fn simplify(self: *@This(), inits: []const StateName) !void {
-        while (try self.simplifyStep(inits) > 0) {}
+        var arena = std.heap.ArenaAllocator.init(self.arena);
+        defer arena.deinit();
+
+        while (try self.simplifyStep(arena.allocator(), inits) > 0) : (_ = arena.reset(.retain_capacity)) {}
     }
 
-    fn simplifyStep(self: *@This(), inits: []const StateName) !u32 {
+    fn simplifyStep(self: *@This(), arena: std.mem.Allocator, inits: []const StateName) !u32 {
         var deleted: u32 = 0;
-        var srcs_used = std.AutoHashMap(StateName, void).init(self.gpa);
+        var srcs_used = std.AutoHashMap(StateName, void).init(arena);
         defer srcs_used.deinit();
 
-        var trg_used = std.AutoHashMap(StateName, void).init(self.gpa);
+        var trg_used = std.AutoHashMap(StateName, void).init(arena);
         defer trg_used.deinit();
 
         for (inits) |i| {
@@ -185,7 +188,7 @@ pub const SM_BPDS_Processor = struct {
             }
         }
 
-        var to_del = std.ArrayList(Rule).init(self.gpa);
+        var to_del = std.ArrayList(Rule).init(arena);
         defer to_del.deinit();
 
         for (self.rules.keys()) |rule| {

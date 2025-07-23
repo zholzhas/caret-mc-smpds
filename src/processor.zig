@@ -167,6 +167,27 @@ pub const LabellingFunction = struct {
         };
     }
 
+    pub fn initFromLabels(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, labels: std.StringArrayHashMap([]const []const u8)) !LabellingFunction {
+        var state_names = std.AutoHashMap(State, []const u8).init(gpa);
+        defer state_names.deinit();
+        var state_aps = std.AutoArrayHashMap(State, std.StringArrayHashMap(void)).init(gpa);
+
+        for (proc.states.state_map.keys()) |name| {
+            const lb = labels.get(name);
+            var ap_set = std.StringArrayHashMap(void).init(gpa);
+            if (lb) |lbls| {
+                for (lbls) |lbl_name| {
+                    try ap_set.put(lbl_name, {});
+                }
+            }
+            try state_aps.put(proc.states.state_map.get(name).?, ap_set);
+        }
+
+        return LabellingFunction{
+            .state_aps = state_aps,
+        };
+    }
+
     pub fn deinit(self: *@This()) void {
         for (self.state_aps.keys()) |s| {
             self.state_aps.getPtr(s).?.deinit();

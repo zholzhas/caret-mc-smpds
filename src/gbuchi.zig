@@ -1085,15 +1085,24 @@ pub const SM_GBPDS_Processor = struct {
     }
 
     pub fn simplify(self: *@This(), inits: []const StateName) !void {
-        while (try self.simplifyStep(inits) > 0) {}
+        var arena = std.heap.ArenaAllocator.init(self.arena);
+        defer arena.deinit();
+
+        var i: usize = 0;
+
+        while (try self.simplifyStep(arena.allocator(), inits) > 0) : (_ = arena.reset(.retain_capacity)) {
+            i += 1;
+            // std.debug.print("Simplify {}:\n", .{i});
+        }
     }
 
-    fn simplifyStep(self: *@This(), inits: []const StateName) !u32 {
+    fn simplifyStep(self: *@This(), arena: std.mem.Allocator, inits: []const StateName) !u32 {
+        // var timer = try std.time.Timer.start();
         var deleted: u32 = 0;
 
-        var ret_sym_pushed = std.AutoHashMap(RetSymbol, void).init(self.gpa);
+        var ret_sym_pushed = std.AutoHashMap(RetSymbol, void).init(arena);
         defer ret_sym_pushed.deinit();
-        var ret_sym_read = std.AutoHashMap(RetSymbol, void).init(self.gpa);
+        var ret_sym_read = std.AutoHashMap(RetSymbol, void).init(arena);
         defer ret_sym_read.deinit();
 
         for (self.rule_set.keys()) |rule| {
@@ -1118,10 +1127,12 @@ pub const SM_GBPDS_Processor = struct {
             }
         }
 
-        var srcs_used = std.AutoHashMap(StateName, void).init(self.gpa);
+        // std.debug.print("Ret Sym scan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+
+        var srcs_used = std.AutoHashMap(StateName, void).init(arena);
         defer srcs_used.deinit();
 
-        var trg_used = std.AutoHashMap(StateName, void).init(self.gpa);
+        var trg_used = std.AutoHashMap(StateName, void).init(arena);
         defer trg_used.deinit();
 
         for (inits) |i| {
@@ -1142,8 +1153,9 @@ pub const SM_GBPDS_Processor = struct {
                 },
             }
         }
+        // std.debug.print("State scan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
-        var to_del = std.ArrayList(Rule).init(self.gpa);
+        var to_del = std.ArrayList(Rule).init(arena);
         defer to_del.deinit();
 
         for (self.rule_set.keys()) |rule| {
@@ -1160,16 +1172,16 @@ pub const SM_GBPDS_Processor = struct {
                             },
                             .standard => {},
                         }
-                        if (r.new_tail) |tail| {
-                            switch (tail.*) {
-                                .ret => |top| {
-                                    if (!ret_sym_read.contains(top)) {
-                                        try to_del.append(rule);
-                                    }
-                                },
-                                .standard => {},
-                            }
-                        }
+                        // if (r.new_tail) |tail| {
+                        //     switch (tail.*) {
+                        //         .ret => |top| {
+                        //             if (!ret_sym_read.contains(top)) {
+                        //                 try to_del.append(rule);
+                        //             }
+                        //         },
+                        //         .standard => {},
+                        //     }
+                        // }
                     }
                 },
                 .sm => |r| {
@@ -1179,12 +1191,14 @@ pub const SM_GBPDS_Processor = struct {
                 },
             }
         }
+        // std.debug.print("Rule scan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
         for (to_del.items) |r| {
-            if (self.rule_set.orderedRemove(r)) {
+            if (self.rule_set.swapRemove(r)) {
                 deleted += 1;
             }
         }
+        // std.debug.print("Deletion: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
         return deleted;
     }
 };
