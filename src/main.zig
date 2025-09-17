@@ -11,10 +11,18 @@ const debug = false;
 var pytest: bool = false;
 var naive: bool = false;
 var bin: bool = false;
+var input_filename: ?[]const u8 = null;
 
 fn parse_args(args: [][:0]u8) void {
     for (args[2..]) |arg| {
         var strip_ind: usize = 0;
+        if (arg[0] != '-') {
+            if (input_filename != null) {
+                std.log.err("Two filenames provided: {s} and {s}\n", .{ input_filename.?, arg });
+            }
+            input_filename = arg;
+            continue;
+        }
         for (arg, 0..) |b, i| {
             if (b != '-') {
                 strip_ind = i;
@@ -80,7 +88,7 @@ pub fn main() !void {
 
     parse_args(args);
 
-    if (args.len < 2) {
+    if (input_filename == null) {
         std.log.err("Provide a filename\n", .{});
         return error.OtherError;
     }
@@ -88,23 +96,23 @@ pub fn main() !void {
     var result: bool = undefined;
     if (pytest) {
         if (naive) {
-            result = caret_model_check_pytest_naive(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+            result = caret_model_check_pytest_naive(gpa.allocator(), arena.allocator(), input_filename) catch |e| blk: {
                 print_errors(e);
                 break :blk false;
             };
         } else {
-            result = caret_model_check_pytest(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+            result = caret_model_check_pytest(gpa.allocator(), arena.allocator(), input_filename) catch |e| blk: {
                 print_errors(e);
                 break :blk false;
             };
         }
     } else if (bin) {
-        result = caret_model_check_bin(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+        result = caret_model_check_bin(gpa.allocator(), arena.allocator(), input_filename) catch |e| blk: {
             print_errors(e);
             break :blk false;
         };
     } else {
-        result = caret_model_check_smpds_file(gpa.allocator(), arena.allocator(), args[1]) catch |e| blk: {
+        result = caret_model_check_smpds_file(gpa.allocator(), arena.allocator(), input_filename) catch |e| blk: {
             print_errors(e);
             break :blk false;
         };
