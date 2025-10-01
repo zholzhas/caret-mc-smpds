@@ -146,21 +146,51 @@ pub const SymbolProcessor = struct {
 };
 
 pub const LabellingFunction = struct {
-    state_aps: std.AutoArrayHashMap(State, std.StringArrayHashMap(void)),
+    pub const Key = struct {
+        state: State,
+        top: Symbol,
+    };
+
+    state_aps: std.AutoArrayHashMap(Key, std.StringArrayHashMap(void)),
 
     pub const Labeller = *const fn ([]const u8, []const u8) bool;
 
-    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, formula: Caret.Formula, func: Labeller) !LabellingFunction {
+    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, formula: Caret.Formula, func: Labeller, valuations: []const parser.Valuation) !LabellingFunction {
         var state_names = std.AutoHashMap(State, []const u8).init(gpa);
         defer state_names.deinit();
-        var state_aps = std.AutoArrayHashMap(State, std.StringArrayHashMap(void)).init(gpa);
+        var state_aps = std.AutoArrayHashMap(Key, std.StringArrayHashMap(void)).init(gpa);
 
         for (proc.states.state_map.keys()) |name| {
             try state_names.put(proc.states.state_map.get(name).?, name);
-            try state_aps.put(proc.states.state_map.get(name).?, std.StringArrayHashMap(void).init(gpa));
+            for (proc.symbols.symbol_map.keys()) |symbol| {
+                try state_aps.put(.{ .state = proc.states.state_map.get(name).?, .top = proc.symbols.symbol_map.get(symbol).? }, std.StringArrayHashMap(void).init(gpa));
+            }
         }
 
         try fillAps(&state_aps, formula, state_names, func);
+
+        for (valuations) |val| {
+            switch (val.val) {
+                .state => |s| {
+                    for (proc.symbols.symbol_map.keys()) |symbol| {
+                        for (proc.states.state_map.keys()) |state_str| {
+                            if (func(s, state_str)) {
+                                const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = proc.symbols.symbol_map.get(symbol).? }).?;
+                                try ap_set.*.put(val.ap, {});
+                            }
+                        }
+                    }
+                },
+                .simple => |s| {
+                    for (proc.states.state_map.keys()) |state_str| {
+                        if (func(s.state, state_str)) {
+                            const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = proc.symbols.symbol_map.get(s.top).? }).?;
+                            try ap_set.*.put(val.ap, {});
+                        }
+                    }
+                },
+            }
+        }
 
         return LabellingFunction{
             .state_aps = state_aps,
@@ -180,7 +210,10 @@ pub const LabellingFunction = struct {
                     try ap_set.put(lbl_name, {});
                 }
             }
-            try state_aps.put(proc.states.state_map.get(name).?, ap_set);
+
+            for (proc.symbols.symbol_map.keys()) |symbol| {
+                try state_aps.put(.{ .state = proc.states.state_map.get(name).?, .top = proc.symbols.symbol_map.get(symbol).? }, ap_set);
+            }
         }
 
         return LabellingFunction{
@@ -216,7 +249,7 @@ pub const LabellingFunction = struct {
     }.cmp;
 
     pub fn fillAps(
-        state_aps: *std.AutoArrayHashMap(State, std.StringArrayHashMap(void)),
+        state_aps: *std.AutoArrayHashMap(Key, std.StringArrayHashMap(void)),
         formula: Caret.Formula,
         state_names: std.AutoHashMap(State, []const u8),
         func: Labeller,
@@ -224,7 +257,7 @@ pub const LabellingFunction = struct {
         switch (formula) {
             .at => |at| {
                 for (state_aps.keys()) |s| {
-                    const name = state_names.get(s).?;
+                    const name = state_names.get(s.state).?;
                     if (func(at.name, name)) {
                         try state_aps.getPtr(s).?.put(at.name, {});
                     }
@@ -262,14 +295,14 @@ pub const LabellingFunction = struct {
         }
     }
 
-    pub fn isAPinState(self: @This(), ap: []const u8, state: State) bool {
-        const aps = self.getAPs(state);
+    // pub fn isAPinState(self: @This(), ap: []const u8, state: State) bool {
+    //     const aps = self.getAPs(state);
 
-        return aps.contains(ap);
-    }
+    //     return aps.contains(ap);
+    // }
 
-    pub fn getAPs(self: @This(), state: State) std.StringArrayHashMap(void) {
-        return self.state_aps.get(state).?;
+    pub fn getAPs(self: @This(), key: Key) std.StringArrayHashMap(void) {
+        return self.state_aps.get(key).?;
     }
 };
 

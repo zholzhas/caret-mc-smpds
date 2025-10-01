@@ -6,7 +6,7 @@ pub const SymbolName = general.SymbolName;
 pub const PhaseName = general.PhaseName;
 pub const Symbol = general.Symbol;
 
-pub const State = packed struct {
+pub const State = struct {
     general: general.State,
     counter: u8,
 };

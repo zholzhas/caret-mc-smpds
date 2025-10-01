@@ -380,10 +380,11 @@ pub const Atom = struct {
 
 pub const ExitLabel = enum(u2) { exit, unexit };
 
-pub const State = packed struct {
+pub const State = struct {
     control_point: processor.State,
     atom: AtomName,
     label: ExitLabel,
+    sm_aux: ?processor.RuleName = null,
 };
 
 pub const RetSymbol = packed struct {
@@ -708,12 +709,12 @@ pub const SM_GBPDS_Processor = struct {
         if (!a_left.isTransition(.call)) return null;
 
         const s_left = r.from;
-        const aps_left = lambda.getAPs(s_left);
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         const s_right = r.to;
-        const aps_right = lambda.getAPs(s_right);
-        if (!a_right.containsAPsExactly(aps_right)) return null;
+        // const aps_right = lambda.getAPs(s_right);
+        // if (!a_right.containsAPsExactly(aps_right)) return null;
 
         if (!a_left.glNext(a_right.*)) return null;
         if (!a_right.calNext(a_left.*)) return null;
@@ -760,12 +761,12 @@ pub const SM_GBPDS_Processor = struct {
         if (!a_left.isTransition(.ret)) return null;
 
         const s_left = r.from;
-        const aps_left = lambda.getAPs(s_left);
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         const s_right = r.to;
-        const aps_right = lambda.getAPs(s_right);
-        if (!a_right.containsAPsExactly(aps_right)) return null;
+        // const aps_right = lambda.getAPs(s_right);
+        // if (!a_right.containsAPsExactly(aps_right)) return null;
 
         if (!a_left.glNext(a_right.*)) return null;
 
@@ -807,7 +808,7 @@ pub const SM_GBPDS_Processor = struct {
         if (!a_ret.isTransition(.call)) return null;
 
         const s_left = r.to;
-        const aps_left = lambda.getAPs(s_left);
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         if (!a_ret.absNext(a_left.*)) return null;
@@ -854,12 +855,12 @@ pub const SM_GBPDS_Processor = struct {
         if (!a_left.isTransition(.int)) return null;
 
         const s_left = r.from;
-        const aps_left = lambda.getAPs(s_left);
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         const s_right = r.to;
-        const aps_right = lambda.getAPs(s_right);
-        if (!a_right.containsAPsExactly(aps_right)) return null;
+        // const aps_right = lambda.getAPs(s_right);
+        // if (!a_right.containsAPsExactly(aps_right)) return null;
 
         if (!a_left.glNext(a_right.*)) return null;
         if (!a_left.absNext(a_right.*)) return null;
@@ -887,24 +888,25 @@ pub const SM_GBPDS_Processor = struct {
         };
     }
 
-    pub fn constructSMRule(
+    pub fn constructSMRuleGamma(
         self: *@This(),
         r: processor.SMRule,
+        gamma: processor.Symbol,
         r_name: processor.RuleName,
         a_left: AtomName,
         a_right: AtomName,
         l_left: ExitLabel,
         lambda: processor.LabellingFunction,
-    ) !?SMRule {
+    ) !?StandardRule {
         if (!a_right.isTransition(.int)) return null;
 
         const s_left = r.from;
-        const aps_left = lambda.getAPs(s_left);
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = gamma });
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         const s_right = r.to;
-        const aps_right = lambda.getAPs(s_right);
-        if (!a_right.containsAPsExactly(aps_right)) return null;
+        // const aps_right = lambda.getAPs(s_right);
+        // if (!a_right.containsAPsExactly(aps_right)) return null;
 
         if (!a_left.glNext(a_right.*)) return null;
         if (!a_left.absNext(a_right.*)) return null;
@@ -920,6 +922,40 @@ pub const SM_GBPDS_Processor = struct {
             .control_point = s_right,
             .atom = a_right,
             .label = l_left,
+            .sm_aux = r_name,
+        });
+
+        return StandardRule{
+            .label = r_name,
+            .from = new_from,
+            .to = new_to,
+            .top = try self.getSymbolName(Symbol{ .standard = gamma }),
+            .new_top = try self.getSymbolName(Symbol{ .standard = gamma }),
+            .new_tail = null,
+        };
+    }
+
+    pub fn constructSMRuleSM(
+        self: *@This(),
+        r: processor.SMRule,
+        r_name: processor.RuleName,
+        a_right: AtomName,
+        l_left: ExitLabel,
+    ) !SMRule {
+        const s_right = r.to;
+
+        const new_from = try self.getStateName(State{
+            .control_point = s_right,
+            .atom = a_right,
+            .label = l_left,
+            .sm_aux = r_name,
+        });
+
+        const new_to = try self.getStateName(State{
+            .control_point = s_right,
+            .atom = a_right,
+            .label = l_left,
+            .sm_aux = null,
         });
 
         return SMRule{
@@ -1065,16 +1101,21 @@ pub const SM_GBPDS_Processor = struct {
                     for (atoms) |*a_left| {
                         for (atoms) |*a_right| {
                             for (label_arr) |l_left| {
-                                const new_r_opt = try self.constructSMRule(
-                                    r,
-                                    r_name,
-                                    a_left,
-                                    a_right,
-                                    l_left,
-                                    lambda,
-                                );
-                                if (new_r_opt) |new_r| {
-                                    try self.storeRule(Rule{ .sm = new_r });
+                                for (sm_pds.alphabet) |gamma| {
+                                    const new_r_opt = try self.constructSMRuleGamma(
+                                        r,
+                                        gamma,
+                                        r_name,
+                                        a_left,
+                                        a_right,
+                                        l_left,
+                                        lambda,
+                                    );
+                                    if (new_r_opt) |new_r| {
+                                        try self.storeRule(Rule{ .standard = new_r });
+                                        const new_r_sm = try self.constructSMRuleSM(r, r_name, a_right, l_left);
+                                        try self.storeRule(Rule{ .sm = new_r_sm });
+                                    }
                                 }
                             }
                         }
@@ -1385,7 +1426,7 @@ test "sm-gbpds construction" {
     var gbpds = SM_GBPDS_Processor.init(std.testing.allocator, allocator);
     defer gbpds.deinit();
 
-    const formula = try processor.processCaret(allocator, unprocessed_conf.caret);
+    const formula = try processor.processCaret(allocator, unprocessed_conf.caret.formula);
 
     const closure = try formula.get_closure(std.testing.allocator);
     defer {
@@ -1403,7 +1444,7 @@ test "sm-gbpds construction" {
         std.testing.allocator.free(atoms);
     }
 
-    var lambda = try processor.LabellingFunction.init(std.testing.allocator, &proc, formula, processor.LabellingFunction.strict);
+    var lambda = try processor.LabellingFunction.init(std.testing.allocator, &proc, formula, processor.LabellingFunction.strict, unprocessed_conf.caret.valuations);
     defer lambda.deinit();
 
     try gbpds.construct(&proc, atoms, lambda);

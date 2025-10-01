@@ -416,7 +416,10 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
 
     return ParsedSMPDS{
         .smpds = res_smpds,
-        .caret = caret,
+        .caret = CaretLogic{
+            .formula = caret,
+            .valuations = &.{},
+        },
         .init = res_init,
     };
 }
@@ -697,7 +700,7 @@ fn formulaRefFn() mecha.Parser(*const RawCaret) {
     return formula3;
 }
 
-const fullCtlFormula = mecha.combine(.{ formulaRef, mecha.eos });
+const fullCaretFormula = mecha.combine(.{ formulaRef, mecha.eos });
 
 fn token(comptime parser: anytype) mecha.Parser(void) {
     return mecha.combine(.{ parser.discard(), ws });
@@ -908,13 +911,112 @@ const sm_pds_rule_grammar = mecha.oneOf(.{
     SMRuleParser(mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string("-(")), id_sequence, ws, token(mecha.string("/")), id_sequence, ws, token(mecha.string(")->")), id_grammar, ws, token(mecha.string(";")) })),
 });
 
+const Regex = union(enum) {
+    u: struct {
+        left: *Regex,
+        right: *Regex,
+    },
+    c: struct {
+        left: *Regex,
+        right: *Regex,
+    },
+    star: *Regex,
+    symbol: []const u8,
+    epsilon: void,
+};
+
+pub const SimpleValuation = struct {
+    state: []const u8,
+    top: []const u8,
+};
+
+pub const APValuation = union(enum) {
+    state: []const u8,
+    simple: SimpleValuation,
+    // regular ....
+};
+
+pub const Valuation = struct {
+    ap: []const u8,
+    val: APValuation,
+};
+
+pub const CaretLogic = struct {
+    formula: *const RawCaret,
+    valuations: []const Valuation,
+};
+
+const ap_valuation = mecha.oneOf(.{
+    // regular valuations in future...
+
+    mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
+        .map(struct {
+        fn map(res: std.meta.Tuple(&.{ []const u8, []const u8 })) APValuation {
+            return APValuation{
+                .simple = SimpleValuation{
+                    .state = res.@"0",
+                    .top = res.@"1",
+                },
+            };
+        }
+    }.map),
+    mecha.combine(.{ id_grammar, ws })
+        .map(struct {
+        fn map(res: []const u8) APValuation {
+            return APValuation{
+                .state = res,
+            };
+        }
+    }.map),
+});
+
+const ap_definition_grammar = mecha.combine(.{
+    id_grammar, ws, token(mecha.string(":=")), ap_valuation,
+}).map(struct {
+    fn map(res: std.meta.Tuple(&.{ []const u8, APValuation })) Valuation {
+        return Valuation{
+            .ap = res.@"0",
+            .val = res.@"1",
+        };
+    }
+}.map);
+
+const caret_grammar = mecha.oneOf(.{
+    mecha.combine(.{
+        token(mecha.string("caret")),
+        token(mecha.string("{")),
+        formulaRef,
+        ws,
+        token(mecha.string("}")),
+        token(mecha.string("[")),
+        ap_definition_grammar.many(.{ .separator = token(mecha.string(",")) }),
+        token(mecha.string("]")),
+    }).map(struct {
+        fn map(res: std.meta.Tuple(&.{ *const RawCaret, []const Valuation })) CaretLogic {
+            return CaretLogic{
+                .formula = res.@"0",
+                .valuations = res.@"1",
+            };
+        }
+    }.map),
+
+    mecha.combine(.{ token(mecha.string("caret")), token(mecha.string("{")), formulaRef, ws, token(mecha.string("}")) }).map(struct {
+        fn map(res: *const RawCaret) CaretLogic {
+            return CaretLogic{
+                .formula = res,
+                .valuations = &.{},
+            };
+        }
+    }.map),
+});
+
 const sm_pds_grammar = mecha.combine(.{
     ws,
     init_state_grammar,
-    mecha.combine(.{ token(mecha.string("caret")), token(mecha.string("{")), formulaRef, ws, token(mecha.string("}")) }),
+    caret_grammar,
     SMPDSParser(sm_pds_rule_grammar.many(.{ .separator = ws })),
 }).map(struct {
-    fn map(res: std.meta.Tuple(&.{ Conf, *const RawCaret, SM_PDS })) ParsedSMPDS {
+    fn map(res: std.meta.Tuple(&.{ Conf, CaretLogic, SM_PDS })) ParsedSMPDS {
         return ParsedSMPDS{
             .init = res.@"0",
             .caret = res.@"1",
@@ -946,7 +1048,7 @@ const init_state_grammar = mecha.combine(.{
 
 pub const ParsedSMPDS = struct {
     init: Conf,
-    caret: *const RawCaret,
+    caret: CaretLogic,
     smpds: SM_PDS,
 };
 
@@ -1037,7 +1139,7 @@ test "caret formula" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const res = try fullCtlFormula.parse(allocator, str);
+    const res = try fullCaretFormula.parse(allocator, str);
     switch (res.value) {
         .ok => |_| {},
         .err => {
@@ -1045,6 +1147,44 @@ test "caret formula" {
 
             const snippet_length = @min(str.len - res.index, 5);
             std.debug.print("Parsing Caret Error at line {d}, column {d}:\n{s}...\n", .{ pos.line, pos.col, str[res.index..][0..snippet_length] });
+            try std.testing.expect(false);
+        },
+    }
+}
+
+test "caret formula with valuations" {
+    const str = "caret{ ~(True Ug ( ~ p1 ) ) }[ p1 := p2, p3 := p4: gamma1 .* ]";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const res = try caret_grammar.parse(allocator, str);
+    switch (res.value) {
+        .ok => |caret_logic| {
+            const correct_val: []const Valuation = &.{
+                Valuation{
+                    .ap = "p1",
+                    .val = APValuation{
+                        .state = "p2",
+                    },
+                },
+                Valuation{
+                    .ap = "p3",
+                    .val = APValuation{
+                        .simple = SimpleValuation{
+                            .state = "p4",
+                            .top = "gamma1",
+                        },
+                    },
+                },
+            };
+            try std.testing.expectEqualDeep(correct_val, caret_logic.valuations);
+        },
+        .err => {
+            const pos = getErrorPosition(str, res.index);
+
+            const snippet_length = @min(str.len - res.index, 5);
+            std.debug.print("Parsing Caret Logic Error at line {d}, column {d}:\n{s}...\n", .{ pos.line, pos.col, str[res.index..][0..snippet_length] });
             try std.testing.expect(false);
         },
     }
@@ -1219,7 +1359,7 @@ test "rule parser" {
                 .right = &RawCaret{
                     .xg = &RawCaret{ .ap = "p2" },
                 },
-            } }, val.caret);
+            } }, val.caret.formula);
         },
         .err => |_| {
             std.debug.print("Error at {any}\n", .{getErrorPosition(example, sm_pds_res.index)});

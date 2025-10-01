@@ -286,9 +286,9 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
     try proc.process(unprocessed, unprocessed_conf.init);
     const conf = try proc.getInit(unprocessed_conf.init);
 
-    const formula = try processor.processCaret(arena, unprocessed_conf.caret);
+    const formula = try processor.processCaret(arena, unprocessed_conf.caret.formula);
 
-    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc);
+    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc, unprocessed_conf.caret.valuations);
     defer lambda.deinit();
 
     return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
@@ -313,7 +313,7 @@ pub fn caret_model_check_bin(gpa: std.mem.Allocator, arena: std.mem.Allocator, f
     try proc.process(unprocessed, unprocessed_conf.init);
     const conf = try proc.getInit(unprocessed_conf.init);
 
-    const formula = try processor.processCaret(arena, unprocessed_conf.caret);
+    const formula = try processor.processCaret(arena, unprocessed_conf.caret.formula);
 
     var lambda = try processor.LabellingFunction.initFromLabels(gpa, &proc, unprocessed_json.labels);
     defer lambda.deinit();
@@ -351,9 +351,9 @@ pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allo
     try pds_proc.process(pds.smpds, pds.init);
     const pds_conf = try pds_proc.getInit(pds.init);
 
-    const formula = try processor.processCaret(arena, pds.caret);
+    const formula = try processor.processCaret(arena, pds.caret.formula);
 
-    var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive);
+    var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive, pds.caret.valuations);
     defer lambda.deinit();
 
     const res = try caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
