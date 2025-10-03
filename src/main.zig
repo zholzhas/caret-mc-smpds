@@ -301,24 +301,30 @@ pub fn caret_model_check_smpds_file(gpa: std.mem.Allocator, arena: std.mem.Alloc
     return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.strict);
 }
 
+// pub fn caret_model_check_bin(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
+//     const unprocessed_json = try parser.parseJsonWithLabels(arena, filename);
+//     const unprocessed_conf = unprocessed_json.system;
+
+//     var proc = processor.SM_PDS_Processor.init(arena, gpa);
+
+//     defer proc.deinit();
+
+//     const unprocessed = unprocessed_conf.smpds;
+//     try proc.process(unprocessed, unprocessed_conf.init);
+//     const conf = try proc.getInit(unprocessed_conf.init);
+
+//     const formula = try processor.processCaret(arena, unprocessed_conf.caret);
+
+//     var lambda = try processor.LabellingFunction.initFromLabels(gpa, &proc, unprocessed_json.labels);
+//     defer lambda.deinit();
+
+//     return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
+// }
+
 pub fn caret_model_check_bin(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
-    const unprocessed_json = try parser.parseJsonWithLabels(arena, filename);
-    const unprocessed_conf = unprocessed_json.system;
+    const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
 
-    var proc = processor.SM_PDS_Processor.init(arena, gpa);
-
-    defer proc.deinit();
-
-    const unprocessed = unprocessed_conf.smpds;
-    try proc.process(unprocessed, unprocessed_conf.init);
-    const conf = try proc.getInit(unprocessed_conf.init);
-
-    const formula = try processor.processCaret(arena, unprocessed_conf.caret.formula);
-
-    var lambda = try processor.LabellingFunction.initFromLabels(gpa, &proc, unprocessed_json.labels);
-    defer lambda.deinit();
-
-    return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
+    return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.substr);
 }
 
 pub fn caret_model_check_pytest(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {

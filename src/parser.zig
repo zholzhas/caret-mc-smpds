@@ -485,6 +485,35 @@ fn fromLor(comptime parser: mecha.Parser(BinaryOp)) mecha.Parser(*const RawCaret
     }.parse };
 }
 
+fn fromLand(comptime parser: mecha.Parser(BinaryOp)) mecha.Parser(*const RawCaret) {
+    const Res = mecha.Result(*const RawCaret);
+    return .{ .parse = struct {
+        fn parse(allocator: std.mem.Allocator, str: []const u8) !Res {
+            const res_comb: mecha.Result(BinaryOp) = try parser.parse(allocator, str);
+
+            return switch (res_comb.value) {
+                .ok => blk: {
+                    const caret = try allocator.create(RawCaret);
+                    const leftc = try allocator.create(RawCaret);
+                    const rightc = try allocator.create(RawCaret);
+                    leftc.* = RawCaret{ .lnot = res_comb.value.ok.@"0" };
+                    rightc.* = RawCaret{ .lnot = res_comb.value.ok.@"1" };
+                    caret.* = RawCaret{ .lor = .{
+                        .left = leftc,
+                        .right = rightc,
+                    } };
+                    const land_caret = try allocator.create(RawCaret);
+                    land_caret.* = RawCaret{
+                        .lnot = caret,
+                    };
+                    break :blk Res.ok(res_comb.index, land_caret);
+                },
+                .err => Res.err(res_comb.index),
+            };
+        }
+    }.parse };
+}
+
 fn fromLnot(comptime parser: mecha.Parser(*const RawCaret)) mecha.Parser(*const RawCaret) {
     const Res = mecha.Result(*const RawCaret);
     return .{ .parse = struct {
@@ -679,6 +708,7 @@ fn formulaXRef() mecha.Parser(*const RawCaret) {
 }
 
 const formula2 = mecha.oneOf(.{
+    fromLand(mecha.combine(.{ formulaX, ws, token(mecha.string("&&")), mecha.ref(formula2Ref) })),
     formulaX,
 });
 fn formula2Ref() mecha.Parser(*const RawCaret) {

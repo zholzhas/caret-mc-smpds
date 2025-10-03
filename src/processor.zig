@@ -236,7 +236,7 @@ pub const LabellingFunction = struct {
 
     pub const substr: Labeller = struct {
         pub fn cmp(ap: []const u8, control_point: []const u8) bool {
-            return std.mem.indexOf(u8, control_point, ap);
+            return std.mem.indexOf(u8, control_point, ap) != null;
         }
     }.cmp;
 
