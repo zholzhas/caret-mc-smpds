@@ -1070,6 +1070,15 @@ pub fn processCaret(
     return processCaretAux(arena, caret_raw);
 }
 
+pub const NFA = struct {
+    pub const Node = u32;
+    pub const Edge = struct {
+        from: Node,
+        sym: []const u8,
+        to: Node,
+    };
+};
+
 test "processing" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();

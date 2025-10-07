@@ -414,6 +414,38 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
         .phase = phase,
     };
 
+    switch (val.array.items[3]) {
+        .array => {},
+        else => {
+            std.log.err("Atomic proposition set is not an array\n", .{});
+            return error.StringParseError;
+        },
+    }
+
+    const aps = val.array.items[3].array;
+    const valuations = try allocator.alloc(Valuation, aps.items.len);
+    for (aps.items, 0..) |ap_pair, i| {
+        switch (ap_pair) {
+            .array => |ap_arr| {
+                if (ap_arr.items.len == 2) {
+                    valuations[i] = Valuation{
+                        .ap = try allocator.dupe(u8, ap_arr.items[0].string),
+                        .val = APValuation{
+                            .state = try allocator.dupe(u8, ap_arr.items[1].string),
+                        },
+                    };
+                } else {
+                    std.log.err("Atomic proposition {} is invalid\n", .{ap_pair});
+                    return error.StringParseError;
+                }
+            },
+            else => {
+                std.log.err("Atomic proposition is not an array\n", .{});
+                return error.StringParseError;
+            },
+        }
+    }
+
     return ParsedSMPDS{
         .smpds = res_smpds,
         .caret = CaretLogic{
@@ -943,27 +975,142 @@ const sm_pds_rule_grammar = mecha.oneOf(.{
 
 const Regex = union(enum) {
     u: struct {
-        left: *Regex,
-        right: *Regex,
+        left: *const Regex,
+        right: *const Regex,
     },
     c: struct {
-        left: *Regex,
-        right: *Regex,
+        left: *const Regex,
+        right: *const Regex,
     },
-    star: *Regex,
+    star: *const Regex,
     symbol: []const u8,
+    anysymbol: void,
     epsilon: void,
 };
+
+fn fromUnion(comptime parser: mecha.Parser(std.meta.Tuple(&.{ *const Regex, *const Regex }))) mecha.Parser(*const Regex) {
+    const Res = mecha.Result(*const Regex);
+    return .{ .parse = struct {
+        fn parse(allocator: std.mem.Allocator, str: []const u8) !Res {
+            const res_comb: mecha.Result(std.meta.Tuple(&.{ *const Regex, *const Regex })) = try parser.parse(allocator, str);
+
+            return switch (res_comb.value) {
+                .ok => blk: {
+                    const reg = try allocator.create(Regex);
+                    reg.* = Regex{ .u = .{ .left = res_comb.value.ok.@"0", .right = res_comb.value.ok.@"1" } };
+                    break :blk Res.ok(res_comb.index, reg);
+                },
+                .err => Res.err(res_comb.index),
+            };
+        }
+    }.parse };
+}
+
+fn fromConcat(comptime parser: mecha.Parser(std.meta.Tuple(&.{ *const Regex, *const Regex }))) mecha.Parser(*const Regex) {
+    const Res = mecha.Result(*const Regex);
+    return .{ .parse = struct {
+        fn parse(allocator: std.mem.Allocator, str: []const u8) !Res {
+            const res_comb: mecha.Result(std.meta.Tuple(&.{ *const Regex, *const Regex })) = try parser.parse(allocator, str);
+
+            return switch (res_comb.value) {
+                .ok => blk: {
+                    const reg = try allocator.create(Regex);
+                    reg.* = Regex{ .c = .{ .left = res_comb.value.ok.@"0", .right = res_comb.value.ok.@"1" } };
+                    break :blk Res.ok(res_comb.index, reg);
+                },
+                .err => Res.err(res_comb.index),
+            };
+        }
+    }.parse };
+}
+
+fn fromStar(comptime parser: mecha.Parser(*const Regex)) mecha.Parser(*const Regex) {
+    const Res = mecha.Result(*const Regex);
+    return .{ .parse = struct {
+        fn parse(allocator: std.mem.Allocator, str: []const u8) !Res {
+            const res_comb: mecha.Result(*const Regex) = try parser.parse(allocator, str);
+
+            return switch (res_comb.value) {
+                .ok => blk: {
+                    const reg = try allocator.create(Regex);
+                    reg.* = Regex{ .star = res_comb.value.ok };
+                    break :blk Res.ok(res_comb.index, reg);
+                },
+                .err => Res.err(res_comb.index),
+            };
+        }
+    }.parse };
+}
+
+fn fromToken(comptime parser: mecha.Parser([]const u8)) mecha.Parser(*const Regex) {
+    const Res = mecha.Result(*const Regex);
+    return .{ .parse = struct {
+        fn parse(allocator: std.mem.Allocator, str: []const u8) !Res {
+            const res_comb: mecha.Result([]const u8) = try parser.parse(allocator, str);
+
+            return switch (res_comb.value) {
+                .ok => blk: {
+                    const reg = try allocator.create(Regex);
+                    reg.* = Regex{ .symbol = res_comb.value.ok };
+                    break :blk Res.ok(res_comb.index, reg);
+                },
+                .err => Res.err(res_comb.index),
+            };
+        }
+    }.parse };
+}
+
+const regex_grammar = regex_grammar_u;
+const regex_grammar_u = mecha.oneOf(.{
+    fromUnion(mecha.combine(.{ regex_grammar_c, ws, token(mecha.string("|")), mecha.ref(regex_u) })),
+    regex_grammar_c,
+});
+
+fn regex_u() mecha.Parser(*const Regex) {
+    return regex_grammar_u;
+}
+
+const regex_grammar_c = mecha.oneOf(.{
+    fromConcat(mecha.combine(.{ regex_grammar_s, ws, token(mecha.string("+")), mecha.ref(regex_c) })),
+    regex_grammar_s,
+});
+
+fn regex_c() mecha.Parser(*const Regex) {
+    return regex_grammar_c;
+}
+
+const regex_grammar_s = mecha.oneOf(.{
+    fromStar(mecha.combine(.{ regex_grammar_t, ws, token(mecha.string("*")) })),
+    regex_grammar_t,
+});
+
+fn regex_s() mecha.Parser(*const Regex) {
+    return regex_grammar_s;
+}
+
+const anysym = Regex{ .anysymbol = {} };
+const epsilon = Regex{ .epsilon = {} };
+
+const regex_grammar_t = mecha.oneOf(.{
+    token(mecha.string(".")).mapConst(&anysym),
+    mecha.combine(.{ token(mecha.string("(")), mecha.ref(regex_u), ws, token(mecha.string(")")) }),
+    fromToken(id_grammar),
+});
 
 pub const SimpleValuation = struct {
     state: []const u8,
     top: []const u8,
 };
 
+pub const RegularValuation = struct {
+    state: []const u8,
+    regex: *const Regex,
+};
+
 pub const APValuation = union(enum) {
     state: []const u8,
     simple: SimpleValuation,
-    // regular ....
+    regular: RegularValuation,
 };
 
 pub const Valuation = struct {
@@ -977,7 +1124,17 @@ pub const CaretLogic = struct {
 };
 
 const ap_valuation = mecha.oneOf(.{
-    // regular valuations in future...
+    mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), regex_grammar })
+        .map(struct {
+        fn map(res: std.meta.Tuple(&.{ []const u8, *const Regex })) APValuation {
+            return APValuation{
+                .regular = RegularValuation{
+                    .state = res.@"0",
+                    .regex = res.@"1",
+                },
+            };
+        }
+    }.map),
 
     mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
         .map(struct {
@@ -1227,6 +1384,44 @@ test "smpds file" {
 
     var file = SmpdsFile.open(allocator, "examples/example.smpds");
     _ = try file.parse();
+}
+
+test "caret formula with regular valuations" {
+    const str = "caret{ ~(True Ug ( ~ p1 ) ) }[ p1 := p2 : gamma1 + gamma2 * + (gamma1 | gamma2)* + .*, p3 := p4: gamma1 + .* ]";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const res = try caret_grammar.parse(allocator, str);
+    switch (res.value) {
+        .ok => |caret_logic| {
+            const correct_val: []const Valuation = &.{
+                Valuation{
+                    .ap = "p1",
+                    .val = APValuation{
+                        .state = "p2",
+                    },
+                },
+                Valuation{
+                    .ap = "p3",
+                    .val = APValuation{
+                        .simple = SimpleValuation{
+                            .state = "p4",
+                            .top = "gamma1",
+                        },
+                    },
+                },
+            };
+            try std.testing.expectEqualDeep(correct_val, caret_logic.valuations);
+        },
+        .err => {
+            const pos = getErrorPosition(str, res.index);
+
+            const snippet_length = @min(str.len - res.index, 5);
+            std.debug.print("Parsing Caret Logic Error at line {d}, column {d}:\n{s}...\n", .{ pos.line, pos.col, str[res.index..][0..snippet_length] });
+            try std.testing.expect(false);
+        },
+    }
 }
 
 test "rule parser" {
