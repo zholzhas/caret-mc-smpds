@@ -426,21 +426,24 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
     const valuations = try allocator.alloc(Valuation, aps.items.len);
     for (aps.items, 0..) |ap_pair, i| {
         switch (ap_pair) {
-            .array => |ap_arr| {
-                if (ap_arr.items.len == 2) {
-                    valuations[i] = Valuation{
-                        .ap = try allocator.dupe(u8, ap_arr.items[0].string),
-                        .val = APValuation{
-                            .state = try allocator.dupe(u8, ap_arr.items[1].string),
-                        },
-                    };
-                } else {
-                    std.log.err("Atomic proposition {} is invalid\n", .{ap_pair});
-                    return error.StringParseError;
+            .string => |ap_str| {
+                const val_res = try ap_definition_grammar_finished.parse(allocator, ap_str);
+                switch (val_res.value) {
+                    .ok => |valuation| {
+                        valuations[i] = valuation;
+                    },
+                    .err => {
+                        const pos = getErrorPosition(ap_str, val_res.index);
+
+                        const snippet_length = @min(ap_str.len - val_res.index, 5);
+                        std.debug.print("Parsing AP Error at line {d}, column {d}:\n{s}...\n", .{ pos.line, pos.col, ap_str[val_res.index..][0..snippet_length] });
+
+                        return error.StringParseError;
+                    },
                 }
             },
             else => {
-                std.log.err("Atomic proposition is not an array\n", .{});
+                std.log.err("Atomic proposition is not a string\n", .{});
                 return error.StringParseError;
             },
         }
@@ -1207,6 +1210,8 @@ const ap_definition_grammar = mecha.combine(.{
         };
     }
 }.map);
+
+const ap_definition_grammar_finished = mecha.combine(.{ ap_definition_grammar, mecha.eos });
 
 const caret_grammar = mecha.oneOf(.{
     mecha.combine(.{
