@@ -2,7 +2,7 @@ init p1 g1 # r1 r2;
 
 caret{ (Xg Xg Xg Xg a1) where
 [
-    a1 := p1 : g2 .*
+    a1 := p1 : (g1 | g2) + .*
 ]}
 
 r1: p1 g1 +> p2 g2 g1;

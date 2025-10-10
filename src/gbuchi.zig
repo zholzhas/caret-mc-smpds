@@ -1018,8 +1018,9 @@ pub const SM_GBPDS_Processor = struct {
 
         self.accept_atoms = try self.constructAcceptAtoms(atoms);
 
-        for (sm_pds.rules.keys()) |r_name| {
-            const rule = sm_pds.rules.get(r_name).?;
+        for (sm_pds.rules.items) |labelled_r| {
+            const r_name = labelled_r.label;
+            const rule = labelled_r.rule;
             switch (rule) {
                 .call => |r| {
                     for (atoms) |*a_left| {
@@ -1421,7 +1422,7 @@ test "sm-gbpds construction" {
     const unprocessed_conf = try file.parse();
     const unprocessed = unprocessed_conf.smpds;
     try proc.process(unprocessed, unprocessed_conf.init);
-    _ = try proc.getInit(unprocessed_conf.init);
+    var ini = try proc.getInit(unprocessed_conf.init);
 
     var gbpds = SM_GBPDS_Processor.init(std.testing.allocator, allocator);
     defer gbpds.deinit();
@@ -1444,7 +1445,7 @@ test "sm-gbpds construction" {
         std.testing.allocator.free(atoms);
     }
 
-    var lambda = try processor.LabellingFunction.init(std.testing.allocator, &proc, formula, processor.LabellingFunction.strict, unprocessed_conf.caret.valuations);
+    var lambda = try processor.LabellingFunction.init(std.testing.allocator, &proc, formula, processor.LabellingFunction.strict, unprocessed_conf.caret.valuations, &ini);
     defer lambda.deinit();
 
     try gbpds.construct(&proc, atoms, lambda);

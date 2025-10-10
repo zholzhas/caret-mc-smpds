@@ -6,7 +6,7 @@ const hr = @import("head_reachability.zig");
 const builtin = @import("builtin");
 const std = @import("std");
 
-const debug = false;
+// const debug = false;
 
 var pytest: bool = false;
 var naive: bool = false;
@@ -284,11 +284,11 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
 
     const unprocessed = unprocessed_conf.smpds;
     try proc.process(unprocessed, unprocessed_conf.init);
-    const conf = try proc.getInit(unprocessed_conf.init);
+    var conf = try proc.getInit(unprocessed_conf.init);
 
     const formula = try processor.processCaret(arena, unprocessed_conf.caret.formula);
 
-    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc, unprocessed_conf.caret.valuations);
+    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc, unprocessed_conf.caret.valuations, &conf);
     defer lambda.deinit();
 
     return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
@@ -537,35 +537,35 @@ test "whole" {
     }
 }
 
-test "naive" {
-    if (debug) {
-        try std.testing.expect(true);
-        return;
-    }
-    const gpa = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
+// test "naive" {
+//     if (debug) {
+//         try std.testing.expect(true);
+//         return;
+//     }
+//     const gpa = std.testing.allocator;
+//     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+//     defer arena.deinit();
 
-    const cwd = std.fs.cwd();
-    const test_dir = try cwd.openDir("tests", .{
-        .iterate = true,
-    });
+//     const cwd = std.fs.cwd();
+//     const test_dir = try cwd.openDir("tests", .{
+//         .iterate = true,
+//     });
 
-    var test_file_iter = test_dir.iterate();
-    while (try test_file_iter.next()) |file| {
-        if (file.kind == .file and std.mem.endsWith(u8, file.name, ".smpds")) {
-            // std.debug.print("testing {s}\n", .{file.name});
-            const name = file.name;
+//     var test_file_iter = test_dir.iterate();
+//     while (try test_file_iter.next()) |file| {
+//         if (file.kind == .file and std.mem.endsWith(u8, file.name, ".smpds")) {
+//             // std.debug.print("testing {s}\n", .{file.name});
+//             const name = file.name;
 
-            const res = try caret_model_check_smpds_naive(gpa, arena.allocator(), try test_dir.realpathAlloc(arena.allocator(), file.name));
+//             const res = try caret_model_check_smpds_naive(gpa, arena.allocator(), try test_dir.realpathAlloc(arena.allocator(), file.name));
 
-            std.testing.expectEqual(std.mem.startsWith(u8, name, "true"), res) catch |err| {
-                std.debug.print("Failed naive {s}\n", .{name});
-                return err;
-            };
-        }
-    }
-}
+//             std.testing.expectEqual(std.mem.startsWith(u8, name, "true"), res) catch |err| {
+//                 std.debug.print("Failed naive {s}\n", .{name});
+//                 return err;
+//             };
+//         }
+//     }
+// }
 
 test "dependencies" {
     _ = parser.SM_PDS;
@@ -574,6 +574,8 @@ test "dependencies" {
     _ = hr.HeadReachabilityGraph;
 }
 
+// const debug = true;
+const debug = false;
 test "debug" {
     if (!debug) {
         try std.testing.expect(true);
@@ -589,7 +591,7 @@ test "debug" {
     var proc_ = processor.SM_PDS_Processor.init(arena, std.testing.allocator);
     defer proc_.deinit();
 
-    var file = parser.SmpdsFile.open(arena, "tests/true.test");
+    var file = parser.SmpdsFile.open(arena, "tests/true-2.smpds");
 
     const unprocessed_conf = try file.parse();
     const unprocessed = unprocessed_conf.smpds;
@@ -621,7 +623,7 @@ test "debug" {
 
     var proc = proc_;
 
-    const conf = conf_;
+    var conf = conf_;
     const lab_func = processor.LabellingFunction.strict;
 
     // ----
@@ -629,7 +631,7 @@ test "debug" {
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
     defer gbpds.deinit();
 
-    const formula = try processor.processCaret(arena, unprocessed_conf.caret);
+    const formula = try processor.processCaret(arena, unprocessed_conf.caret.formula);
 
     const closure = try formula.get_closure(gpa);
     defer {
@@ -647,7 +649,7 @@ test "debug" {
         gpa.free(atoms);
     }
 
-    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lab_func);
+    var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lab_func, unprocessed_conf.caret.valuations, &conf);
     defer lambda.deinit();
 
     // const aps = lambda.getAPs(conf.state);

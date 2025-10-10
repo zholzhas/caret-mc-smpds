@@ -8,7 +8,7 @@ pub const RuleName = u32;
 pub const PhaseName = u32;
 pub const Conf = struct {
     state: State,
-    stack: []const Symbol,
+    stack: []Symbol,
     phase: PhaseName,
 };
 
@@ -20,7 +20,17 @@ pub const RetRule = struct { from: State, top: Symbol, to: State };
 
 pub const SMRule = struct { from: State, old_phase: PhaseName, new_phase: PhaseName, to: State };
 
-pub const Rule = union(enum) { int: InternalRule, call: CallRule, ret: RetRule, sm: SMRule };
+pub const Rule = union(enum) {
+    int: InternalRule,
+    call: CallRule,
+    ret: RetRule,
+    sm: SMRule,
+};
+
+pub const LabelledRule = struct {
+    label: RuleName,
+    rule: Rule,
+};
 
 pub fn Pair(comptime F: type, comptime S: type) type {
     return struct {
@@ -32,7 +42,7 @@ pub fn Pair(comptime F: type, comptime S: type) type {
 pub const SM_PDS = struct {
     states: []const State,
     alphabet: []const Symbol,
-    rules: std.AutoArrayHashMap(RuleName, Rule),
+    rules: std.ArrayList(LabelledRule),
     end_of_stack: Symbol,
 
     init_conf: Conf,
@@ -129,10 +139,14 @@ pub const StateProcessor = struct {
 
 pub const SymbolProcessor = struct {
     symbol_map: std.StringArrayHashMap(Symbol),
+    symbol_names: std.AutoArrayHashMap(Symbol, []const u8),
     var symbol_name_offset: Symbol = 0;
 
     pub fn init(allocator: std.mem.Allocator) @This() {
-        return .{ .symbol_map = std.StringArrayHashMap(Symbol).init(allocator) };
+        return .{
+            .symbol_map = std.StringArrayHashMap(Symbol).init(allocator),
+            .symbol_names = std.AutoArrayHashMap(Symbol, []const u8).init(allocator),
+        };
     }
 
     pub fn get_symbol_name(self: *@This(), label: []const u8) !Symbol {
@@ -140,6 +154,7 @@ pub const SymbolProcessor = struct {
             const name = symbol_name_offset;
             symbol_name_offset += 1;
             try self.symbol_map.put(label, name);
+            try self.symbol_names.put(name, label);
             break :blk name;
         };
     }
@@ -155,7 +170,7 @@ pub const LabellingFunction = struct {
 
     pub const Labeller = *const fn ([]const u8, []const u8) bool;
 
-    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, formula: Caret.Formula, func: Labeller, valuations: []const parser.Valuation) !LabellingFunction {
+    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor, formula: Caret.Formula, func: Labeller, valuations: []const parser.Valuation, init_conf: *Conf) !LabellingFunction {
         var state_names = std.AutoHashMap(State, []const u8).init(gpa);
         defer state_names.deinit();
         var state_aps = std.AutoArrayHashMap(Key, std.StringArrayHashMap(void)).init(gpa);
@@ -167,28 +182,353 @@ pub const LabellingFunction = struct {
             }
         }
 
+        const alphabet = proc.symbols.symbol_map.keys();
+
+        var dfas = std.ArrayList(DFA).init(gpa);
+        defer {
+            for (dfas.items) |*dfa| {
+                dfa.deinit();
+            }
+            dfas.deinit();
+        }
+
+        var unique_dfas = std.StringHashMap(usize).init(gpa);
+        defer {
+            var keyit = unique_dfas.keyIterator();
+            while (keyit.next()) |k| {
+                gpa.free(k.*);
+            }
+            unique_dfas.deinit();
+        }
+
+        var ap_dfas = std.StringHashMap(std.AutoHashMap(State, usize)).init(gpa);
+        defer {
+            var it = ap_dfas.keyIterator();
+            while (it.next()) |k| {
+                ap_dfas.getPtr(k.*).?.deinit();
+            }
+            ap_dfas.deinit();
+        }
+
+        for (valuations) |val| {
+            const gop = try ap_dfas.getOrPut(val.ap);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.AutoHashMap(State, usize).init(gpa);
+            }
+            switch (val.val) {
+                .regular => |reg| {
+                    const regstr = try std.fmt.allocPrint(gpa, "{}", .{reg.regex.*});
+                    defer gpa.free(regstr);
+
+                    const dfa_gop = try unique_dfas.getOrPut(regstr);
+                    if (!dfa_gop.found_existing) {
+                        dfa_gop.key_ptr.* = try gpa.dupe(u8, regstr);
+                        dfa_gop.value_ptr.* = dfas.items.len;
+                        var new_nfa = try NFA.initFromRegex(gpa, reg.regex);
+                        defer new_nfa.deinit();
+                        try new_nfa.regToNfa();
+                        new_nfa.reverse();
+                        const dfa = try new_nfa.determinize(gpa, alphabet);
+                        try dfas.append(dfa);
+                        // for (dfa.edges.items) |edge| {
+                        //     std.debug.print("{} - {s} -> {}\n", .{ edge.from, edge.sym, edge.to });
+                        // }
+                        // std.debug.print("Start: {}\nFinish: {any}\n", .{ dfa.start, dfa.finish.items });
+                    }
+                    if (reg.state == null) {
+                        for (proc.states.state_map.keys()) |st| {
+                            try gop.value_ptr.*.put(proc.states.state_map.get(st).?, dfa_gop.value_ptr.*);
+                        }
+                    } else {
+                        try gop.value_ptr.*.put(proc.states.state_map.get(reg.state.?).?, dfa_gop.value_ptr.*);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        const dfa_set = DFASet{
+            .dfas = dfas.items,
+        };
+
+        const all_states = try dfa_set.getAllStates(gpa);
+        defer {
+            for (all_states) |s| {
+                gpa.free(s);
+            }
+            gpa.free(all_states);
+        }
+
+        var new_rules = std.ArrayList(LabelledRule).init(gpa);
+        defer new_rules.deinit();
+
+        const RegSymbolPair = struct {
+            sym: Symbol,
+            state: []const DFA.Node,
+        };
+
+        var regular_symbols_map = std.AutoArrayHashMap(Symbol, RegSymbolPair).init(gpa);
+
+        defer {
+            for (regular_symbols_map.keys()) |s| {
+                const p = regular_symbols_map.get(s).?;
+                gpa.free(p.state);
+            }
+            regular_symbols_map.deinit();
+        }
+
+        for (proc.system.?.rules.items) |lr| {
+            switch (lr.rule) {
+                .int => |r| {
+                    const topstr = proc.symbols.symbol_names.get(r.top).?;
+
+                    for (all_states) |state| {
+                        const topstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ topstr, state });
+                        const top2 = try proc.process_symbol(topstr2);
+                        if (!regular_symbols_map.contains(top2)) {
+                            try regular_symbols_map.put(top2, .{ .sym = r.top, .state = try gpa.dupe(DFA.Node, state) });
+                        }
+                        if (r.new_top == null) {
+                            try new_rules.append(LabelledRule{
+                                .label = lr.label,
+                                .rule = Rule{
+                                    .int = InternalRule{
+                                        .from = r.from,
+                                        .top = top2,
+                                        .to = r.to,
+                                        .new_top = null,
+                                        .new_tail = null,
+                                    },
+                                },
+                            });
+                        } else if (r.new_tail == null) {
+                            const new_topstr = proc.symbols.symbol_names.get(r.new_top.?).?;
+                            const new_topstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ new_topstr, state });
+                            const new_top2 = try proc.process_symbol(new_topstr2);
+                            if (!regular_symbols_map.contains(new_top2)) {
+                                try regular_symbols_map.put(new_top2, .{ .sym = r.new_top.?, .state = try gpa.dupe(DFA.Node, state) });
+                            }
+                            try new_rules.append(LabelledRule{
+                                .label = lr.label,
+                                .rule = Rule{
+                                    .int = InternalRule{
+                                        .from = r.from,
+                                        .top = top2,
+                                        .to = r.to,
+                                        .new_top = new_top2,
+                                        .new_tail = null,
+                                    },
+                                },
+                            });
+                        } else {
+                            const new_tailstr = proc.symbols.symbol_names.get(r.new_tail.?).?;
+                            const new_tailstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ new_tailstr, state });
+                            const new_tail2 = try proc.process_symbol(new_tailstr2);
+                            if (!regular_symbols_map.contains(new_tail2)) {
+                                try regular_symbols_map.put(new_tail2, .{ .sym = r.new_tail.?, .state = try gpa.dupe(DFA.Node, state) });
+                            }
+
+                            const newstate = try dfa_set.getEdge(gpa, state, new_tailstr);
+                            defer gpa.free(newstate);
+
+                            const new_topstr = proc.symbols.symbol_names.get(r.new_top.?).?;
+                            const new_topstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ new_topstr, newstate });
+                            const new_top2 = try proc.process_symbol(new_topstr2);
+                            if (!regular_symbols_map.contains(new_top2)) {
+                                try regular_symbols_map.put(new_top2, .{ .sym = r.new_top.?, .state = try gpa.dupe(DFA.Node, newstate) });
+                            }
+
+                            try new_rules.append(LabelledRule{
+                                .label = lr.label,
+                                .rule = Rule{
+                                    .int = InternalRule{
+                                        .from = r.from,
+                                        .top = top2,
+                                        .to = r.to,
+                                        .new_top = new_top2,
+                                        .new_tail = new_tail2,
+                                    },
+                                },
+                            });
+                        }
+                    }
+                },
+                .call => |r| {
+                    const topstr = proc.symbols.symbol_names.get(r.top).?;
+
+                    for (all_states) |state| {
+                        const topstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ topstr, state });
+                        const top2 = try proc.process_symbol(topstr2);
+
+                        if (!regular_symbols_map.contains(top2)) {
+                            try regular_symbols_map.put(top2, .{ .sym = r.top, .state = try gpa.dupe(DFA.Node, state) });
+                        }
+
+                        const new_tailstr = proc.symbols.symbol_names.get(r.new_tail).?;
+                        const new_tailstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ new_tailstr, state });
+                        const new_tail2 = try proc.process_symbol(new_tailstr2);
+
+                        const newstate = try dfa_set.getEdge(gpa, state, new_tailstr);
+                        defer gpa.free(newstate);
+
+                        const new_topstr = proc.symbols.symbol_names.get(r.new_top).?;
+                        const new_topstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ new_topstr, newstate });
+                        const new_top2 = try proc.process_symbol(new_topstr2);
+
+                        if (!regular_symbols_map.contains(new_tail2)) {
+                            try regular_symbols_map.put(new_tail2, .{ .sym = r.new_tail, .state = try gpa.dupe(DFA.Node, state) });
+                        }
+
+                        if (!regular_symbols_map.contains(new_top2)) {
+                            try regular_symbols_map.put(new_top2, .{ .sym = r.new_top, .state = try gpa.dupe(DFA.Node, newstate) });
+                        }
+
+                        try new_rules.append(LabelledRule{
+                            .label = lr.label,
+                            .rule = Rule{
+                                .call = CallRule{
+                                    .from = r.from,
+                                    .top = top2,
+                                    .to = r.to,
+                                    .new_top = new_top2,
+                                    .new_tail = new_tail2,
+                                },
+                            },
+                        });
+                    }
+                },
+                .ret => |r| {
+                    const topstr = proc.symbols.symbol_names.get(r.top).?;
+
+                    for (all_states) |state| {
+                        const topstr2 = try std.fmt.allocPrint(proc.arena, "{s}@{any}", .{ topstr, state });
+                        const top2 = try proc.process_symbol(topstr2);
+
+                        if (!regular_symbols_map.contains(top2)) {
+                            try regular_symbols_map.put(top2, .{ .sym = r.top, .state = try gpa.dupe(DFA.Node, state) });
+                        }
+
+                        try new_rules.append(LabelledRule{
+                            .label = lr.label,
+                            .rule = Rule{
+                                .ret = RetRule{
+                                    .from = r.from,
+                                    .top = top2,
+                                    .to = r.to,
+                                },
+                            },
+                        });
+                    }
+                },
+                .sm => {
+                    try new_rules.append(lr);
+                },
+            }
+        }
+
+        proc.system.?.rules.clearRetainingCapacity();
+        try proc.system.?.rules.appendSlice(new_rules.items);
+
+        for (regular_symbols_map.keys()) |symbol| {
+            for (proc.states.state_map.keys()) |name| {
+                try state_aps.put(.{ .state = proc.states.state_map.get(name).?, .top = symbol }, std.StringArrayHashMap(void).init(gpa));
+            }
+        }
+
+        proc.system.?.alphabet = try proc.arena.dupe(Symbol, regular_symbols_map.keys());
+
         try fillAps(&state_aps, formula, state_names, func);
 
         for (valuations) |val| {
             switch (val.val) {
                 .state => |s| {
-                    for (proc.symbols.symbol_map.keys()) |symbol| {
-                        for (proc.states.state_map.keys()) |state_str| {
-                            if (func(s, state_str)) {
-                                const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = proc.symbols.symbol_map.get(symbol).? }).?;
-                                try ap_set.*.put(val.ap, {});
+                    if (regular_symbols_map.count() > 0) {
+                        for (regular_symbols_map.keys()) |symbol| {
+                            for (proc.states.state_map.keys()) |state_str| {
+                                if (func(s, state_str)) {
+                                    const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = symbol }).?;
+                                    try ap_set.*.put(val.ap, {});
+                                }
+                            }
+                        }
+                    } else {
+                        for (proc.symbols.symbol_map.keys()) |symbol| {
+                            for (proc.states.state_map.keys()) |state_str| {
+                                if (func(s, state_str)) {
+                                    const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = proc.symbols.symbol_map.get(symbol).? }).?;
+                                    try ap_set.*.put(val.ap, {});
+                                }
                             }
                         }
                     }
                 },
                 .simple => |s| {
-                    for (proc.states.state_map.keys()) |state_str| {
-                        if (func(s.state, state_str)) {
-                            const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = proc.symbols.symbol_map.get(s.top).? }).?;
-                            try ap_set.*.put(val.ap, {});
+                    if (regular_symbols_map.count() > 0) {
+                        for (proc.states.state_map.keys()) |state_str| {
+                            if (s.state == null or func(s.state.?, state_str)) {
+                                for (regular_symbols_map.keys()) |symbol| {
+                                    if (regular_symbols_map.get(symbol).?.sym == proc.symbols.symbol_map.get(s.top).?) {
+                                        const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = symbol }).?;
+                                        try ap_set.*.put(val.ap, {});
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for (proc.states.state_map.keys()) |state_str| {
+                            if (s.state == null or func(s.state.?, state_str)) {
+                                const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = proc.symbols.symbol_map.get(s.top).? }).?;
+                                try ap_set.*.put(val.ap, {});
+                            }
                         }
                     }
                 },
+                .regular => |reg| {
+                    for (proc.states.state_map.keys()) |state_str| {
+                        if (reg.state == null or func(reg.state.?, state_str)) {
+                            for (regular_symbols_map.keys()) |symbol| {
+                                const dfa_num = ap_dfas.get(val.ap).?.get(proc.states.state_map.get(state_str).?).?;
+                                const sym_pair = regular_symbols_map.get(symbol).?;
+                                const dfa_state = sym_pair.state[dfa_num];
+                                const fin = dfas.items[dfa_num].finish;
+                                const symstr = proc.symbols.symbol_names.get(sym_pair.sym).?;
+                                for (dfas.items[dfa_num].edges.items) |edge| {
+                                    if (edge.from == dfa_state and std.mem.eql(u8, edge.sym, symstr)) {
+                                        for (fin.items) |f| {
+                                            if (f == edge.to) {
+                                                const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = symbol }).?;
+                                                try ap_set.*.put(val.ap, {});
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+
+        if (regular_symbols_map.count() > 0) {
+            const prev_state = try dfa_set.getInit(gpa);
+            defer gpa.free(prev_state);
+            const cur_state = try dfa_set.getInit(gpa);
+            defer gpa.free(cur_state);
+            var ind = init_conf.stack.len - 1;
+            while (ind >= 0) {
+                for (regular_symbols_map.keys()) |symbol| {
+                    const sym_pair = regular_symbols_map.get(symbol).?;
+                    if (sym_pair.sym == init_conf.stack[ind] and std.mem.eql(DFA.Node, sym_pair.state, prev_state)) {
+                        init_conf.stack[ind] = symbol;
+
+                        dfa_set.getEdgePrealloced(cur_state, prev_state, proc.symbols.symbol_names.get(sym_pair.sym).?);
+
+                        std.mem.copyBackwards(u32, prev_state, cur_state);
+                    }
+                }
+                if (ind == 0) break;
+                ind -= 1;
             }
         }
 
@@ -378,7 +718,7 @@ pub const SM_PDS_Processor = struct {
     };
 
     pub fn process(self: *@This(), smpds: Unprocessed.SM_PDS, init_conf: Unprocessed.Conf) !void {
-        var rules = std.AutoArrayHashMap(RuleName, Rule).init(self.gpa);
+        var rules = std.ArrayList(LabelledRule).init(self.gpa);
 
         for (smpds.rules) |rule| {
             const processed_rule: Rule = switch (rule.typ) {
@@ -409,7 +749,7 @@ pub const SM_PDS_Processor = struct {
                 } },
             };
             const name = try self.process_rule_name(rule.name);
-            try rules.put(name, processed_rule);
+            try rules.append(LabelledRule{ .label = name, .rule = processed_rule });
         }
 
         var states = try self.arena.alloc(State, smpds.states.len);
@@ -464,10 +804,11 @@ pub const SM_PDS_Processor = struct {
             try visited_phases.put(ph, {});
 
             const phase = self.phase_names.phase_values.get(ph).?;
-            rule_loop: for (self.system.?.rules.keys()) |r_name| {
+            rule_loop: for (self.system.?.rules.items) |r_labelled| {
+                const r_name = r_labelled.label;
                 if (!phase.items.contains(r_name)) continue :rule_loop;
 
-                const rule = self.system.?.rules.get(r_name).?;
+                const rule = r_labelled.rule;
                 switch (rule) {
                     .sm => |r| {
                         const old_phase = self.phase_names.phase_values.get(r.old_phase).?;
@@ -503,6 +844,198 @@ pub const SM_PDS_Processor = struct {
                 }
             }
         }
+    }
+};
+
+const StatePrinter = struct {
+    printer: *SM_PDS_Printer,
+    to_print: State,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        try writer.print("{s}", .{self.printer.state_map.get(self.to_print).?});
+    }
+};
+
+const SymbolPrinter = struct {
+    printer: *SM_PDS_Printer,
+    to_print: Symbol,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        try writer.print("{s}", .{self.printer.proc.symbols.symbol_names.get(self.to_print).?});
+    }
+};
+
+const RuleNamePrinter = struct {
+    printer: *SM_PDS_Printer,
+    to_print: RuleName,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        try writer.print("{s}", .{self.printer.rule_map.get(self.to_print).?});
+    }
+};
+
+const PhasePrinter = struct {
+    printer: *SM_PDS_Printer,
+    to_print: PhaseName,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        const phase = self.printer.proc.phase_names.phase_values.get(self.to_print).?;
+        for (phase.items.keys(), 0..) |rn, i| {
+            try writer.print("{}", .{self.printer.rulename(rn)});
+            if (i < phase.items.count() - 1) {
+                try writer.print(", ", .{});
+            }
+        }
+    }
+};
+
+const RulePrinter = struct {
+    printer: *SM_PDS_Printer,
+    to_print: LabelledRule,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        try writer.print("{}: ", .{self.printer.rulename(self.to_print.label)});
+        switch (self.to_print.rule) {
+            .int => |r| {
+                try writer.print("{} {} -int-> {} {?} {?}", .{
+                    self.printer.state(r.from),
+                    self.printer.symbol(r.top),
+                    self.printer.state(r.to),
+                    if (r.new_top) |rr| self.printer.symbol(rr) else null,
+                    if (r.new_tail) |rr| self.printer.symbol(rr) else null,
+                });
+            },
+            .call => |r| {
+                try writer.print("{} {} -call-> {} {} {}", .{
+                    self.printer.state(r.from),
+                    self.printer.symbol(r.top),
+                    self.printer.state(r.to),
+                    self.printer.symbol(r.new_top),
+                    self.printer.symbol(r.new_tail),
+                });
+            },
+
+            .ret => |r| {
+                try writer.print("{} {} -ret-> {}", .{
+                    self.printer.state(r.from),
+                    self.printer.symbol(r.top),
+                    self.printer.state(r.to),
+                });
+            },
+
+            .sm => |r| {
+                try writer.print("{} -({} / {})-> {}", .{
+                    self.printer.state(r.from),
+                    self.printer.phase(r.old_phase),
+                    self.printer.phase(r.new_phase),
+                    self.printer.state(r.to),
+                });
+            },
+        }
+    }
+};
+
+const SM_PDS_Printer = struct {
+    proc: *SM_PDS_Processor,
+    state_map: std.AutoHashMap(State, []const u8),
+    rule_map: std.AutoHashMap(RuleName, []const u8),
+
+    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor) !SM_PDS_Printer {
+        var state_map = std.AutoHashMap(State, []const u8).init(gpa);
+        for (proc.states.state_map.keys()) |k| {
+            try state_map.put(proc.states.state_map.get(k).?, k);
+        }
+
+        var rule_map = std.AutoHashMap(RuleName, []const u8).init(gpa);
+        for (proc.rule_names.rule_map.keys()) |k| {
+            try rule_map.put(proc.rule_names.rule_map.get(k).?, k);
+        }
+
+        return SM_PDS_Printer{
+            .proc = proc,
+            .state_map = state_map,
+            .rule_map = rule_map,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.state_map.deinit();
+        self.rule_map.deinit();
+    }
+
+    pub fn rulename(self: *@This(), r: RuleName) RuleNamePrinter {
+        return RuleNamePrinter{
+            .printer = self,
+            .to_print = r,
+        };
+    }
+
+    pub fn state(self: *@This(), s: State) StatePrinter {
+        return .{
+            .printer = self,
+            .to_print = s,
+        };
+    }
+
+    pub fn symbol(self: *@This(), s: Symbol) SymbolPrinter {
+        return .{
+            .printer = self,
+            .to_print = s,
+        };
+    }
+
+    pub fn phase(self: *@This(), s: PhaseName) PhasePrinter {
+        return .{
+            .printer = self,
+            .to_print = s,
+        };
+    }
+
+    pub fn rule(self: *@This(), s: LabelledRule) RulePrinter {
+        return .{
+            .printer = self,
+            .to_print = s,
+        };
     }
 };
 
@@ -1070,14 +1603,623 @@ pub fn processCaret(
     return processCaretAux(arena, caret_raw);
 }
 
-pub const NFA = struct {
+// pub fn preprocessRegex(arena: std.mem.Allocator, gpa: std.mem.Allocator, smpds: parser.ParsedSMPDS) !parser.ParsedSMPDS {
+//     var contains_regex: bool = false;
+//     for (smpds.caret.valuations) |val| {
+//         switch (val.val) {
+//             .regular => contains_regex = true,
+//         }
+//     }
+//     if (!contains_regex) {
+//         return smpds;
+//     }
+
+//     var unique_dfas = std.StringArrayHashMap(DFA).init(gpa);
+//     defer unique_dfas.deinit();
+
+//     var aps = std.ArrayList([]const u8).init(gpa);
+//     defer aps.deinit();
+
+//     // fillAps(smpds.caret.formula, aps);
+
+//     var emptyDfa = DFA{
+//         .max_node = 0,
+//         .start = 0,
+//         .finish = std.ArrayList(DFA.Node).init(gpa),
+//         .edges = std.ArrayList(DFA.Edge).init(gpa),
+//     };
+// }
+
+pub const DFASet = struct {
+    dfas: []const DFA,
+
+    fn allStatesAux(gpa: std.mem.Allocator, variants: []const std.AutoArrayHashMap(DFA.Node, void), res: *std.ArrayList([]const DFA.Node), cur: *std.ArrayList(DFA.Node)) !void {
+        if (cur.items.len == variants.len) {
+            try res.append(try cur.toOwnedSlice());
+            return;
+        }
+        for (variants[cur.items.len].keys()) |node| {
+            var next_cur = try cur.clone();
+            try next_cur.append(node);
+            try allStatesAux(gpa, variants, res, &next_cur);
+        }
+        cur.deinit();
+    }
+
+    pub fn getAllStates(self: @This(), gpa: std.mem.Allocator) ![][]const DFA.Node {
+        const state_sets = try gpa.alloc(std.AutoArrayHashMap(DFA.Node, void), self.dfas.len);
+        defer {
+            for (state_sets) |*ss| {
+                ss.deinit();
+            }
+            gpa.free(state_sets);
+        }
+        for (self.dfas, state_sets) |dfa, *state_set| {
+            state_set.* = std.AutoArrayHashMap(DFA.Node, void).init(gpa);
+            for (dfa.edges.items) |edge| {
+                try state_set.put(edge.from, {});
+                try state_set.put(edge.to, {});
+            }
+        }
+        var perms = std.ArrayList([]const DFA.Node).init(gpa);
+        var dummy = std.ArrayList(DFA.Node).init(gpa);
+        try allStatesAux(gpa, state_sets, &perms, &dummy);
+        return perms.toOwnedSlice();
+    }
+
+    pub fn getEdge(self: @This(), gpa: std.mem.Allocator, from: []const DFA.Node, sym: []const u8) ![]DFA.Node {
+        if (from.len != self.dfas.len) {
+            unreachable;
+        }
+        const new_nodes = try gpa.alloc(DFA.Node, self.dfas.len);
+        for (self.dfas, from, new_nodes) |dfa, fr, *trg| {
+            for (dfa.edges.items) |edge| {
+                if (edge.from == fr and std.mem.eql(u8, edge.sym, sym)) {
+                    trg.* = edge.to;
+                }
+            }
+        }
+        return new_nodes;
+    }
+
+    pub fn getEdgePrealloced(self: @This(), buf: []DFA.Node, from: []const DFA.Node, sym: []const u8) void {
+        if (from.len != self.dfas.len) {
+            unreachable;
+        }
+        const new_nodes = buf;
+        loop1: for (self.dfas, from, new_nodes) |dfa, fr, *trg| {
+            for (dfa.edges.items) |edge| {
+                if (edge.from == fr and std.mem.eql(u8, edge.sym, sym)) {
+                    trg.* = edge.to;
+                    continue :loop1;
+                }
+            }
+            unreachable;
+        }
+    }
+
+    pub fn getInit(self: @This(), gpa: std.mem.Allocator) ![]DFA.Node {
+        const new_nodes = try gpa.alloc(DFA.Node, self.dfas.len);
+        for (self.dfas, new_nodes) |dfa, *trg| {
+            trg.* = dfa.start;
+        }
+        return new_nodes;
+    }
+};
+
+pub const DFA = struct {
     pub const Node = u32;
     pub const Edge = struct {
         from: Node,
         sym: []const u8,
         to: Node,
     };
+
+    max_node: Node,
+    start: Node,
+    finish: std.ArrayList(Node),
+    edges: std.ArrayList(Edge),
+
+    pub fn deinit(self: *@This()) void {
+        self.finish.deinit();
+        self.edges.deinit();
+    }
+
+    pub fn add_node(self: *@This()) Node {
+        const res = self.max_node;
+        self.max_node += 1;
+        return res;
+    }
 };
+
+pub const NFA = struct {
+    pub const Node = u32;
+    pub const Edge = struct {
+        from: Node,
+        sym: *const parser.Regex,
+        to: Node,
+    };
+
+    max_node: Node,
+    start: Node,
+    finish: Node,
+    edges: std.ArrayList(Edge),
+
+    pub fn initFromRegex(gpa: std.mem.Allocator, regex: *const parser.Regex) !NFA {
+        var nfa = NFA{
+            .max_node = 0,
+            .start = 0,
+            .finish = 0,
+            .edges = std.ArrayList(Edge).init(gpa),
+        };
+        const node1 = nfa.add_node();
+        const node2 = nfa.add_node();
+        nfa.start = node1;
+        nfa.finish = node2;
+        try nfa.edges.append(Edge{
+            .from = node1,
+            .sym = regex,
+            .to = node2,
+        });
+        return nfa;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.edges.deinit();
+    }
+
+    pub fn add_node(self: *@This()) Node {
+        const res = self.max_node;
+        self.max_node += 1;
+        return res;
+    }
+
+    pub fn regToNfaStep(self: *@This()) !bool {
+        var edge_opt: ?Edge = null;
+        for (self.edges.items, 0..) |e, i| {
+            switch (e.sym.*) {
+                .u, .c, .star => {
+                    edge_opt = e;
+                    _ = self.edges.swapRemove(i);
+                    break;
+                },
+                else => {},
+            }
+        }
+        if (edge_opt == null) return false;
+        const edge = edge_opt.?;
+        switch (edge.sym.*) {
+            .u => |pair| {
+                try self.edges.append(Edge{
+                    .from = edge.from,
+                    .to = edge.to,
+                    .sym = pair.left,
+                });
+                try self.edges.append(Edge{
+                    .from = edge.from,
+                    .to = edge.to,
+                    .sym = pair.right,
+                });
+            },
+            .c => |pair| {
+                const new_node = self.add_node();
+                try self.edges.append(Edge{
+                    .from = edge.from,
+                    .to = new_node,
+                    .sym = pair.left,
+                });
+                try self.edges.append(Edge{
+                    .from = new_node,
+                    .to = edge.to,
+                    .sym = pair.right,
+                });
+            },
+            .star => |reg| {
+                var count_left: u32 = 0;
+                var count_right: u32 = 0;
+                for (self.edges.items) |e| {
+                    if (e.from == edge.from) {
+                        count_left += 1;
+                    }
+                    if (e.to == edge.to) {
+                        count_right += 1;
+                    }
+                }
+                if (count_left == 0) {
+                    try self.edges.append(Edge{
+                        .from = edge.from,
+                        .to = edge.from,
+                        .sym = reg,
+                    });
+                    try self.edges.append(Edge{
+                        .from = edge.from,
+                        .to = edge.to,
+                        .sym = &parser.epsilon,
+                    });
+                } else if (count_right == 0) {
+                    try self.edges.append(Edge{
+                        .from = edge.to,
+                        .to = edge.to,
+                        .sym = reg,
+                    });
+                    try self.edges.append(Edge{
+                        .from = edge.from,
+                        .to = edge.to,
+                        .sym = &parser.epsilon,
+                    });
+                } else {
+                    const new_node = self.add_node();
+                    try self.edges.append(Edge{
+                        .from = edge.from,
+                        .to = new_node,
+                        .sym = &parser.epsilon,
+                    });
+                    try self.edges.append(Edge{
+                        .from = new_node,
+                        .to = edge.to,
+                        .sym = &parser.epsilon,
+                    });
+                    try self.edges.append(Edge{
+                        .from = new_node,
+                        .to = new_node,
+                        .sym = reg,
+                    });
+                }
+            },
+            else => unreachable,
+        }
+        return true;
+    }
+
+    pub fn regToNfa(self: *@This()) !void {
+        while (try self.regToNfaStep()) {}
+    }
+
+    fn hasPathAux(self: @This(), gpa: std.mem.Allocator, from: Node, word: []const []const u8, res: *std.AutoArrayHashMap(Node, void), epsilon_visited: *std.AutoArrayHashMap(Node, void)) !void {
+        try epsilon_visited.put(from, {});
+        // std.debug.print("Visited {} / ", .{from});
+        // for (word) |w| {
+        //     std.debug.print("{s} ", .{w});
+        // }
+        // std.debug.print("\n", .{});
+
+        for (self.edges.items) |edge| {
+            if (edge.from == from and !epsilon_visited.contains(edge.to)) {
+                switch (edge.sym.*) {
+                    .epsilon => {
+                        try self.hasPathAux(gpa, edge.to, word, res, epsilon_visited);
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        if (word.len == 0) {
+            try res.put(from, {});
+            return;
+        }
+
+        for (self.edges.items) |edge| {
+            if (edge.from == from) {
+                switch (edge.sym.*) {
+                    .symbol => |sym| {
+                        if (std.mem.eql(u8, sym, word[0])) {
+                            var eps_new = std.AutoArrayHashMap(Node, void).init(gpa);
+                            defer eps_new.deinit();
+
+                            try self.hasPathAux(gpa, edge.to, word[1..], res, &eps_new);
+                        }
+                    },
+                    .anysymbol => {
+                        var eps_new = std.AutoArrayHashMap(Node, void).init(gpa);
+                        defer eps_new.deinit();
+
+                        try self.hasPathAux(gpa, edge.to, word[1..], res, &eps_new);
+                    },
+                    .epsilon => {},
+                    else => unreachable,
+                }
+            }
+        }
+    }
+
+    pub fn hasPath(self: @This(), gpa: std.mem.Allocator, from: Node, word: []const []const u8) !std.AutoArrayHashMap(Node, void) {
+        var res = std.AutoArrayHashMap(Node, void).init(gpa);
+
+        var eps_new = std.AutoArrayHashMap(Node, void).init(gpa);
+        defer eps_new.deinit();
+
+        try self.hasPathAux(gpa, from, word, &res, &eps_new);
+
+        return res;
+    }
+
+    pub fn reverse(self: *@This()) void {
+        for (self.edges.items) |*edge| {
+            const tmp = edge.*.from;
+            edge.*.from = edge.*.to;
+            edge.*.to = tmp;
+        }
+        const tmp = self.start;
+        self.start = self.finish;
+        self.finish = tmp;
+    }
+
+    pub fn determinize(self: *@This(), gpa: std.mem.Allocator, alphabet: []const []const u8) !DFA {
+        const TransitionRow = std.StringArrayHashMap(Node);
+
+        var node_unions = std.ArrayHashMap(Set(Node), Node, SetContext(Node), false).init(gpa);
+        defer {
+            for (node_unions.keys()) |*k| {
+                k.items.deinit();
+            }
+            node_unions.deinit();
+        }
+
+        var node_unions2 = std.AutoArrayHashMap(Node, Set(Node)).init(gpa);
+        defer node_unions2.deinit();
+
+        var transition_table = std.AutoArrayHashMap(Node, TransitionRow).init(gpa);
+        defer {
+            for (transition_table.keys()) |k| {
+                transition_table.getPtr(k).?.deinit();
+            }
+            transition_table.deinit();
+        }
+
+        var visited_nodes = Set(Node){ .items = std.AutoArrayHashMap(Node, void).init(gpa) };
+        defer visited_nodes.items.deinit();
+
+        var stack = std.ArrayList(Node).init(gpa);
+        defer stack.deinit();
+
+        var start_eps = try self.hasPath(gpa, self.start, &.{});
+        var new_start = self.start;
+        if (start_eps.count() == 1) {
+            try stack.append(self.start);
+            start_eps.deinit();
+        } else if (start_eps.count() > 1) {
+            const to_set_s = Set(Node){
+                .items = start_eps,
+            };
+            const gop = try node_unions.getOrPut(to_set_s);
+            if (gop.found_existing) {
+                unreachable;
+            } else {
+                const new_node = self.add_node();
+                gop.value_ptr.* = new_node;
+
+                try node_unions2.put(new_node, to_set_s);
+                try stack.append(new_node);
+                new_start = new_node;
+            }
+        } else {
+            unreachable;
+        }
+        var i: u32 = 0;
+        const trap = self.add_node();
+        while (stack.pop()) |cur| {
+            if (visited_nodes.items.contains(cur)) {
+                continue;
+            }
+            try visited_nodes.items.put(cur, {});
+
+            // if (i > 12) break;
+            i += 1;
+
+            // std.debug.print("Node: {}", .{cur});
+            // if (node_unions2.get(cur)) |cc| {
+            //     std.debug.print("-> {{", .{});
+            //     for (cc.items.keys()) |k| {
+            //         std.debug.print("{}, ", .{k});
+            //     }
+            //     std.debug.print("}}", .{});
+            // }
+            // std.debug.print("\n", .{});
+
+            var cur_set = std.ArrayList(Node).init(gpa);
+            defer cur_set.deinit();
+            if (node_unions2.contains(cur)) {
+                try cur_set.appendSlice(node_unions2.get(cur).?.items.keys());
+            } else {
+                try cur_set.append(cur);
+            }
+
+            var row = TransitionRow.init(gpa);
+
+            for (alphabet) |sym| {
+                var to_set = std.AutoArrayHashMap(Node, void).init(gpa);
+                defer to_set.deinit();
+
+                for (cur_set.items) |cc| {
+                    // std.debug.print("Try {} / {s}:\n", .{ cc, sym });
+                    var path = try self.hasPath(gpa, cc, &.{sym});
+                    defer path.deinit();
+
+                    for (path.keys()) |k| {
+                        try to_set.put(k, {});
+                    }
+                }
+
+                var next_node: Node = undefined;
+                if (to_set.count() == 1) {
+                    next_node = to_set.pop().?.key;
+                } else if (to_set.count() > 1) {
+                    var to_set_s = Set(Node){
+                        .items = try to_set.clone(),
+                    };
+                    const gop = try node_unions.getOrPut(to_set_s);
+                    if (gop.found_existing) {
+                        next_node = gop.value_ptr.*;
+                        to_set_s.items.deinit();
+                    } else {
+                        const new_node = self.add_node();
+                        next_node = new_node;
+                        gop.value_ptr.* = new_node;
+
+                        try node_unions2.put(new_node, to_set_s);
+                    }
+                } else {
+                    next_node = trap;
+                }
+
+                try row.put(sym, next_node);
+
+                if (!visited_nodes.items.contains(next_node)) {
+                    try stack.append(next_node);
+                }
+            }
+
+            try transition_table.put(cur, row);
+        }
+
+        // for (node_unions2.keys()) |k| {
+        //     std.debug.print("{} -> {{", .{k});
+        //     for (node_unions2.get(k).?.items.keys()) |kk| {
+        //         std.debug.print("{}, ", .{kk});
+        //     }
+        //     std.debug.print("}}\n", .{});
+        // }
+
+        var dfa = DFA{
+            .max_node = self.max_node,
+            .start = new_start,
+            .finish = std.ArrayList(DFA.Node).init(gpa),
+            .edges = std.ArrayList(DFA.Edge).init(gpa),
+        };
+
+        for (transition_table.keys()) |from| {
+            for (transition_table.get(from).?.keys()) |sym| {
+                try dfa.edges.append(DFA.Edge{
+                    .from = from,
+                    .sym = sym,
+                    .to = transition_table.get(from).?.get(sym).?,
+                });
+            }
+        }
+
+        for (visited_nodes.items.keys()) |node| {
+            if (node_unions2.get(node)) |n_set| {
+                if (n_set.items.contains(self.finish)) {
+                    try dfa.finish.append(node);
+                }
+            }
+        }
+        return dfa;
+    }
+};
+
+test "regex to nfa" {
+    const gpa = std.testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const Regex = parser.Regex;
+
+    // gamma1 + gamma2* + (gamma1 | gamma2)* + .*
+    const regex = Regex{
+        .c = .{
+            .left = &Regex{
+                .symbol = "gamma1",
+            },
+            .right = &Regex{
+                .c = .{
+                    .left = &Regex{
+                        .star = &Regex{
+                            .symbol = "gamma2",
+                        },
+                    },
+                    .right = &Regex{
+                        .c = .{
+                            .left = &Regex{
+                                .star = &Regex{
+                                    .u = .{ .left = &Regex{
+                                        .symbol = "gamma1",
+                                    }, .right = &Regex{
+                                        .symbol = "gamma2",
+                                    } },
+                                },
+                            },
+                            .right = &Regex{
+                                .star = &Regex{
+                                    .anysymbol = {},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    };
+
+    var nfa = try NFA.initFromRegex(gpa, &regex);
+    defer nfa.deinit();
+
+    try nfa.regToNfa();
+    nfa.reverse();
+
+    // for (nfa.edges.items) |e| {
+    //     std.debug.print("{} - {} -> {}\n", .{ e.from, e.sym.*, e.to });
+    // }
+    // std.debug.print("Start: {}\n Finish: {}\n", .{ nfa.start, nfa.finish });
+
+    var dfa = try nfa.determinize(gpa, &.{ "gamma1", "gamma2" });
+    defer dfa.deinit();
+
+    // for (dfa.edges.items) |e| {
+    //     std.debug.print("{} - {s} -> {}\n", .{ e.from, e.sym, e.to });
+    // }
+    // std.debug.print("Start: {}\n Finish: {any}\n", .{ dfa.start, dfa.finish.items });
+}
+
+test "regex ap" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    StateProcessor.state_name_offset = 0;
+    PhaseProcessor.phase_name_offset = 0;
+    SymbolProcessor.symbol_name_offset = 0;
+    RuleNameProcessor.rule_name_offset = 0;
+
+    var processor = SM_PDS_Processor.init(allocator, std.testing.allocator);
+    defer processor.deinit();
+
+    var file = parser.SmpdsFile.open(allocator, "examples/process_test_regex.smpds");
+    // var file = parser.SmpdsFile.open(allocator, "tests/true-2.smpds");
+    const unprocessed_conf = try file.parse();
+    const unprocessed = unprocessed_conf.smpds;
+    try processor.process(unprocessed, unprocessed_conf.init);
+    var in = try processor.getInit(unprocessed_conf.init);
+
+    const formula = try processCaret(arena.allocator(), unprocessed_conf.caret.formula);
+
+    var lambda = try LabellingFunction.init(gpa, &processor, formula, LabellingFunction.strict, unprocessed_conf.caret.valuations, &in);
+    defer lambda.deinit();
+
+    var printer = try SM_PDS_Printer.init(allocator, &processor);
+    defer printer.deinit();
+
+    // for (processor.system.?.rules.items) |lr| {
+    //     std.debug.print("{}\n", .{printer.rule(lr)});
+    // }
+
+    // for (lambda.state_aps.keys()) |pair| {
+    //     std.debug.print("<{}, {}>: ", .{ printer.state(pair.state), printer.symbol(pair.top) });
+    //     for (lambda.state_aps.get(pair).?.keys()) |ap| {
+    //         std.debug.print("{s}, ", .{ap});
+    //     }
+    //     std.debug.print("\n", .{});
+    // }
+
+    // std.debug.print("Init: {} ", .{printer.state(in.state)});
+    // for (in.stack) |sym| {
+    //     std.debug.print("{}, ", .{printer.symbol(sym)});
+    // }
+    // std.debug.print(" # {}\n", .{printer.phase(in.phase)});
+}
 
 test "processing" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1129,63 +2271,81 @@ test "processing" {
     try std.testing.expectEqual({}, processor.system.?.phases.phase_values.get(3).?.items.get(1).?);
     try std.testing.expectEqual({}, processor.system.?.phases.phase_values.get(3).?.items.get(2).?);
 
-    try std.testing.expectEqual(6, processor.system.?.rules.count());
-    try std.testing.expectEqualDeep(Rule{
-        .int = InternalRule{
-            .from = 0,
-            .top = 0,
-            .to = 1,
-            .new_top = 1,
-            .new_tail = 0,
+    try std.testing.expectEqual(6, processor.system.?.rules.items.len);
+    try std.testing.expectEqualDeep(LabelledRule{
+        .label = 0,
+        .rule = Rule{
+            .int = InternalRule{
+                .from = 0,
+                .top = 0,
+                .to = 1,
+                .new_top = 1,
+                .new_tail = 0,
+            },
         },
-    }, processor.system.?.rules.get(0));
+    }, processor.system.?.rules.items[0]);
 
-    try std.testing.expectEqualDeep(Rule{
-        .call = CallRule{
-            .from = 0,
-            .top = 0,
-            .to = 1,
-            .new_top = 1,
-            .new_tail = 0,
+    try std.testing.expectEqualDeep(LabelledRule{
+        .label = 1,
+        .rule = Rule{
+            .call = CallRule{
+                .from = 0,
+                .top = 0,
+                .to = 1,
+                .new_top = 1,
+                .new_tail = 0,
+            },
         },
-    }, processor.system.?.rules.get(1));
+    }, processor.system.?.rules.items[1]);
 
-    try std.testing.expectEqualDeep(Rule{
-        .sm = SMRule{
-            .from = 2,
-            .to = 2,
-            .old_phase = 0,
-            .new_phase = 1,
+    try std.testing.expectEqualDeep(LabelledRule{
+        .label = 2,
+        .rule = Rule{
+            .sm = SMRule{
+                .from = 2,
+                .to = 2,
+                .old_phase = 0,
+                .new_phase = 1,
+            },
         },
-    }, processor.system.?.rules.get(2));
+    }, processor.system.?.rules.items[2]);
 
-    try std.testing.expectEqualDeep(Rule{
-        .int = InternalRule{
-            .from = 2,
-            .top = 1,
-            .to = 2,
-            .new_top = 1,
-            .new_tail = null,
+    try std.testing.expectEqualDeep(LabelledRule{
+        .label = 3,
+        .rule = Rule{
+            .int = InternalRule{
+                .from = 2,
+                .top = 1,
+                .to = 2,
+                .new_top = 1,
+                .new_tail = null,
+            },
         },
-    }, processor.system.?.rules.get(3));
+    }, processor.system.?.rules.items[3]);
 
-    try std.testing.expectEqualDeep(Rule{
-        .int = InternalRule{
-            .from = 2,
-            .top = 1,
-            .to = 2,
-            .new_top = null,
-            .new_tail = null,
+    try std.testing.expectEqualDeep(LabelledRule{
+        .label = 4,
+        .rule = Rule{
+            .int = InternalRule{
+                .from = 2,
+                .top = 1,
+                .to = 2,
+                .new_top = null,
+                .new_tail = null,
+            },
         },
-    }, processor.system.?.rules.get(4));
+    }, processor.system.?.rules.items[4]);
 
-    try std.testing.expectEqualDeep(Rule{
-        .ret = RetRule{
-            .from = 2,
-            .top = 1,
-            .to = 2,
+    try std.testing.expectEqualDeep(LabelledRule{
+        .label = 5,
+        .rule = Rule{
+            .ret = RetRule{
+                .from = 2,
+                .top = 1,
+                .to = 2,
+            },
         },
-    }, processor.system.?.rules.get(5));
+    }, processor.system.?.rules.items[5]);
 }
 
 test "caret process" {

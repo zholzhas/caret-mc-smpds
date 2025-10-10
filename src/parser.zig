@@ -973,7 +973,7 @@ const sm_pds_rule_grammar = mecha.oneOf(.{
     SMRuleParser(mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string("-(")), id_sequence, ws, token(mecha.string("/")), id_sequence, ws, token(mecha.string(")->")), id_grammar, ws, token(mecha.string(";")) })),
 });
 
-const Regex = union(enum) {
+pub const Regex = union(enum) {
     u: struct {
         left: *const Regex,
         right: *const Regex,
@@ -986,6 +986,25 @@ const Regex = union(enum) {
     symbol: []const u8,
     anysymbol: void,
     epsilon: void,
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (fmt.len != 0) {
+            std.fmt.invalidFmtError(fmt, self);
+        }
+        return switch (self) {
+            .symbol => |sym| try writer.print("{s}", .{sym}),
+            .anysymbol => try writer.print(".", .{}),
+            .epsilon => try writer.print("\\e", .{}),
+            .star => |t| try writer.print("({})*", .{t}),
+            .u => |t| try writer.print("({}) | ({})", .{ t.left, t.right }),
+            .c => |t| try writer.print("({}) + ({})", .{ t.left, t.right }),
+        };
+    }
 };
 
 fn fromUnion(comptime parser: mecha.Parser(std.meta.Tuple(&.{ *const Regex, *const Regex }))) mecha.Parser(*const Regex) {
@@ -1088,8 +1107,8 @@ fn regex_s() mecha.Parser(*const Regex) {
     return regex_grammar_s;
 }
 
-const anysym = Regex{ .anysymbol = {} };
-const epsilon = Regex{ .epsilon = {} };
+pub const anysym = Regex{ .anysymbol = {} };
+pub const epsilon = Regex{ .epsilon = {} };
 
 const regex_grammar_t = mecha.oneOf(.{
     token(mecha.string(".")).mapConst(&anysym),
@@ -1098,12 +1117,12 @@ const regex_grammar_t = mecha.oneOf(.{
 });
 
 pub const SimpleValuation = struct {
-    state: []const u8,
+    state: ?[]const u8,
     top: []const u8,
 };
 
 pub const RegularValuation = struct {
-    state: []const u8,
+    state: ?[]const u8,
     regex: *const Regex,
 };
 
@@ -1124,18 +1143,17 @@ pub const CaretLogic = struct {
 };
 
 const ap_valuation = mecha.oneOf(.{
-    mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), regex_grammar })
+    mecha.combine(.{ token(mecha.string("*")), ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
         .map(struct {
-        fn map(res: std.meta.Tuple(&.{ []const u8, *const Regex })) APValuation {
+        fn map(res: []const u8) APValuation {
             return APValuation{
-                .regular = RegularValuation{
-                    .state = res.@"0",
-                    .regex = res.@"1",
+                .simple = SimpleValuation{
+                    .state = null,
+                    .top = res,
                 },
             };
         }
     }.map),
-
     mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
         .map(struct {
         fn map(res: std.meta.Tuple(&.{ []const u8, []const u8 })) APValuation {
@@ -1143,6 +1161,28 @@ const ap_valuation = mecha.oneOf(.{
                 .simple = SimpleValuation{
                     .state = res.@"0",
                     .top = res.@"1",
+                },
+            };
+        }
+    }.map),
+    mecha.combine(.{ token(mecha.string("*")), ws, token(mecha.string(":")), regex_grammar })
+        .map(struct {
+        fn map(res: *const Regex) APValuation {
+            return APValuation{
+                .regular = RegularValuation{
+                    .state = null,
+                    .regex = res,
+                },
+            };
+        }
+    }.map),
+    mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), regex_grammar })
+        .map(struct {
+        fn map(res: std.meta.Tuple(&.{ []const u8, *const Regex })) APValuation {
+            return APValuation{
+                .regular = RegularValuation{
+                    .state = res.@"0",
+                    .regex = res.@"1",
                 },
             };
         }
@@ -1174,10 +1214,12 @@ const caret_grammar = mecha.oneOf(.{
         token(mecha.string("{")),
         formulaRef,
         ws,
-        token(mecha.string("}")),
+        token(mecha.string("where")),
         token(mecha.string("[")),
-        ap_definition_grammar.many(.{ .separator = token(mecha.string(",")) }),
+        ap_definition_grammar.many(.{ .separator = mecha.combine(.{ ws, token(mecha.string(",")) }) }),
+        ws,
         token(mecha.string("]")),
+        token(mecha.string("}")),
     }).map(struct {
         fn map(res: std.meta.Tuple(&.{ *const RawCaret, []const Valuation })) CaretLogic {
             return CaretLogic{
@@ -1339,8 +1381,35 @@ test "caret formula" {
     }
 }
 
+test "simple val" {
+    const str = "p4: gamma1 .*";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const res = try ap_valuation.parse(allocator, str);
+    switch (res.value) {
+        .ok => |val| {
+            const cor = APValuation{
+                .simple = SimpleValuation{
+                    .state = "p4",
+                    .top = "gamma1",
+                },
+            };
+            try std.testing.expectEqualDeep(cor, val);
+        },
+        .err => {
+            const pos = getErrorPosition(str, res.index);
+
+            const snippet_length = @min(str.len - res.index, 5);
+            std.debug.print("Parsing Caret Logic Error at line {d}, column {d}:\n{s}...\n", .{ pos.line, pos.col, str[res.index..][0..snippet_length] });
+            try std.testing.expect(false);
+        },
+    }
+}
+
 test "caret formula with valuations" {
-    const str = "caret{ ~(True Ug ( ~ p1 ) ) }[ p1 := p2, p3 := p4: gamma1 .* ]";
+    const str = "caret{ ~(True Ug ( ~ p1 ) ) where [ p1 := p2, p3 := p4: gamma1 .* ]}";
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1387,7 +1456,7 @@ test "smpds file" {
 }
 
 test "caret formula with regular valuations" {
-    const str = "caret{ ~(True Ug ( ~ p1 ) ) }[ p1 := p2 : gamma1 + gamma2 * + (gamma1 | gamma2)* + .*, p3 := p4: gamma1 + .* ]";
+    const str = "caret{ ~(True Ug ( ~ p1 ) ) where [ p1 := p2 : gamma1 + gamma2 * + (gamma1 | gamma2)* + .*, p3 := p4: gamma1 + .* ]}";
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1399,17 +1468,62 @@ test "caret formula with regular valuations" {
                 Valuation{
                     .ap = "p1",
                     .val = APValuation{
-                        .state = "p2",
+                        .regular = RegularValuation{
+                            .state = "p2",
+                            .regex = &Regex{
+                                .c = .{
+                                    .left = &Regex{
+                                        .symbol = "gamma1",
+                                    },
+                                    .right = &Regex{
+                                        .c = .{
+                                            .left = &Regex{
+                                                .star = &Regex{
+                                                    .symbol = "gamma2",
+                                                },
+                                            },
+                                            .right = &Regex{
+                                                .c = .{
+                                                    .left = &Regex{
+                                                        .star = &Regex{
+                                                            .u = .{ .left = &Regex{
+                                                                .symbol = "gamma1",
+                                                            }, .right = &Regex{
+                                                                .symbol = "gamma2",
+                                                            } },
+                                                        },
+                                                    },
+                                                    .right = &Regex{
+                                                        .star = &Regex{
+                                                            .anysymbol = {},
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
                     },
                 },
                 Valuation{
                     .ap = "p3",
-                    .val = APValuation{
-                        .simple = SimpleValuation{
-                            .state = "p4",
-                            .top = "gamma1",
+                    .val = APValuation{ .regular = RegularValuation{
+                        .state = "p4",
+                        .regex = &Regex{
+                            .c = .{
+                                .left = &Regex{
+                                    .symbol = "gamma1",
+                                },
+                                .right = &Regex{
+                                    .star = &Regex{
+                                        .anysymbol = {},
+                                    },
+                                },
+                            },
                         },
-                    },
+                    } },
                 },
             };
             try std.testing.expectEqualDeep(correct_val, caret_logic.valuations);
