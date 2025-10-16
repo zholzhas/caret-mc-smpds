@@ -453,7 +453,7 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
         .smpds = res_smpds,
         .caret = CaretLogic{
             .formula = caret,
-            .valuations = &.{},
+            .valuations = valuations,
         },
         .init = res_init,
     };

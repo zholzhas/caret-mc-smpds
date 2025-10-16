@@ -203,9 +203,9 @@ pub const LabellingFunction = struct {
 
         var ap_dfas = std.StringHashMap(std.AutoHashMap(State, usize)).init(gpa);
         defer {
-            var it = ap_dfas.keyIterator();
+            var it = ap_dfas.iterator();
             while (it.next()) |k| {
-                ap_dfas.getPtr(k.*).?.deinit();
+                k.value_ptr.deinit();
             }
             ap_dfas.deinit();
         }
@@ -270,8 +270,7 @@ pub const LabellingFunction = struct {
         var regular_symbols_map = std.AutoArrayHashMap(Symbol, RegSymbolPair).init(gpa);
 
         defer {
-            for (regular_symbols_map.keys()) |s| {
-                const p = regular_symbols_map.get(s).?;
+            for (regular_symbols_map.values()) |p| {
                 gpa.free(p.state);
             }
             regular_symbols_map.deinit();
@@ -2173,6 +2172,55 @@ test "regex to nfa" {
     // std.debug.print("Start: {}\n Finish: {any}\n", .{ dfa.start, dfa.finish.items });
 }
 
+test "regex to nfa 2" {
+    const gpa = std.testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const Regex = parser.Regex;
+
+    // . + gamma2 + .*
+    const regex = Regex{
+        .c = .{
+            .left = &Regex{
+                .anysymbol = {},
+            },
+            .right = &Regex{
+                .c = .{
+                    .left = &Regex{
+                        .symbol = "gamma2",
+                    },
+                    .right = &Regex{
+                        .star = &Regex{
+                            .anysymbol = {},
+                        },
+                    },
+                },
+            },
+        },
+    };
+
+    var nfa = try NFA.initFromRegex(gpa, &regex);
+    defer nfa.deinit();
+
+    try nfa.regToNfa();
+    nfa.reverse();
+
+    // for (nfa.edges.items) |e| {
+    //     std.debug.print("{} - {} -> {}\n", .{ e.from, e.sym.*, e.to });
+    // }
+    // std.debug.print("Start: {}\n Finish: {}\n", .{ nfa.start, nfa.finish });
+
+    var dfa = try nfa.determinize(gpa, &.{ "gamma1", "gamma2" });
+    defer dfa.deinit();
+
+    for (dfa.edges.items) |e| {
+        std.debug.print("{} - {s} -> {}\n", .{ e.from, e.sym, e.to });
+    }
+    std.debug.print("Start: {}\n Finish: {any}\n", .{ dfa.start, dfa.finish.items });
+}
+
 test "regex ap" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -2207,6 +2255,7 @@ test "regex ap" {
     // }
 
     // for (lambda.state_aps.keys()) |pair| {
+    //     if (lambda.state_aps.get(pair).?.count() < 1) continue;
     //     std.debug.print("<{}, {}>: ", .{ printer.state(pair.state), printer.symbol(pair.top) });
     //     for (lambda.state_aps.get(pair).?.keys()) |ap| {
     //         std.debug.print("{s}, ", .{ap});

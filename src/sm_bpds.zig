@@ -207,7 +207,7 @@ pub const SM_BPDS_Processor = struct {
         }
 
         for (to_del.items) |r| {
-            if (self.rules.orderedRemove(r)) {
+            if (self.rules.swapRemove(r)) {
                 deleted += 1;
             }
         }

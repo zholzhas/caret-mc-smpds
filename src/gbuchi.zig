@@ -624,10 +624,10 @@ pub const SM_GBPDS_Processor = struct {
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
 
-    states: std.SinglyLinkedList(State),
+    // states: std.SinglyLinkedList(State),
     state_names: std.AutoArrayHashMap(State, StateName),
 
-    symbols: std.SinglyLinkedList(Symbol),
+    // symbols: std.SinglyLinkedList(Symbol),
     symbol_names: std.AutoArrayHashMap(Symbol, SymbolName),
 
     rule_set: std.AutoArrayHashMap(Rule, void),
@@ -642,10 +642,10 @@ pub const SM_GBPDS_Processor = struct {
             .arena = arena,
             .gpa = gpa,
 
-            .states = std.SinglyLinkedList(State){},
+            // .states = std.SinglyLinkedList(State){},
             .state_names = std.AutoArrayHashMap(State, StateName).init(gpa),
 
-            .symbols = std.SinglyLinkedList(Symbol){},
+            // .symbols = std.SinglyLinkedList(Symbol){},
             .symbol_names = std.AutoArrayHashMap(Symbol, SymbolName).init(gpa),
 
             .rule_set = std.AutoArrayHashMap(Rule, void).init(gpa),
@@ -670,11 +670,10 @@ pub const SM_GBPDS_Processor = struct {
         if (gop.found_existing) {
             return gop.value_ptr.*;
         } else {
-            const node = try self.arena.create(std.SinglyLinkedList(State).Node);
-            node.* = .{ .data = state };
-            self.states.prepend(node);
-            gop.value_ptr.* = &node.data;
-            return &node.data;
+            const node = try self.arena.create(State);
+            node.* = state;
+            gop.value_ptr.* = node;
+            return node;
         }
     }
 
@@ -683,11 +682,10 @@ pub const SM_GBPDS_Processor = struct {
         if (gop.found_existing) {
             return gop.value_ptr.*;
         } else {
-            const node = try self.arena.create(std.SinglyLinkedList(Symbol).Node);
-            node.* = .{ .data = symbol };
-            self.symbols.prepend(node);
-            gop.value_ptr.* = &node.data;
-            return &node.data;
+            const node = try self.arena.create(Symbol);
+            node.* = symbol;
+            gop.value_ptr.* = node;
+            return node;
         }
     }
 
@@ -713,8 +711,8 @@ pub const SM_GBPDS_Processor = struct {
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         const s_right = r.to;
-        // const aps_right = lambda.getAPs(s_right);
-        // if (!a_right.containsAPsExactly(aps_right)) return null;
+        const aps_right = lambda.getAPs(.{ .state = s_right, .top = r.new_top });
+        if (!a_right.containsAPsExactly(aps_right)) return null;
 
         if (!a_left.glNext(a_right.*)) return null;
         if (!a_right.calNext(a_left.*)) return null;
@@ -796,49 +794,36 @@ pub const SM_GBPDS_Processor = struct {
 
     pub fn constructRetRuleDecode(
         self: *@This(),
-        r: processor.RetRule,
-        r_name: processor.RuleName,
-        gamma: processor.Symbol,
-        a_left: AtomName,
-        a_ret: AtomName,
-        l_left: ExitLabel,
-        l_ret: ExitLabel,
+        r: StandardRule,
+        to_decode: RetSymbol,
         lambda: processor.LabellingFunction,
     ) !?StandardRule {
+        const a_ret = to_decode.atom;
+        const l_ret = to_decode.label;
         if (!a_ret.isTransition(.call)) return null;
 
-        const s_left = r.to;
-        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
+        const s_left = r.to.control_point;
+        const a_left = r.to.atom;
+        const l_left = r.to.label;
+        if (l_left != l_ret) return null;
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = to_decode.symbol });
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         if (!a_ret.absNext(a_left.*)) return null;
         if (!a_ret.calFormsEqual(a_left.*)) return null;
-        if (l_left != l_ret) return null;
 
-        const new_from = try self.getStateName(State{
-            .control_point = s_left,
-            .atom = a_left,
-            .label = l_left,
-        });
+        const new_from = r.to;
 
-        const new_to = try self.getStateName(State{
-            .control_point = s_left,
-            .atom = a_left,
-            .label = l_ret,
-        });
+        const new_to = r.to;
 
-        const top = try self.getSymbolName(Symbol{ .ret = RetSymbol{
-            .symbol = gamma,
-            .atom = a_ret,
-            .label = l_ret,
-        } });
+        const top = try self.getSymbolName(Symbol{ .ret = to_decode });
 
         return StandardRule{
-            .label = r_name,
+            .label = r.label,
             .from = new_from,
             .to = new_to,
             .top = top,
-            .new_top = try self.getSymbolName(Symbol{ .standard = gamma }),
+            .new_top = try self.getSymbolName(Symbol{ .standard = to_decode.symbol }),
             .new_tail = null,
         };
     }
@@ -859,8 +844,10 @@ pub const SM_GBPDS_Processor = struct {
         if (!a_left.containsAPsExactly(aps_left)) return null;
 
         const s_right = r.to;
-        // const aps_right = lambda.getAPs(s_right);
-        // if (!a_right.containsAPsExactly(aps_right)) return null;
+        if (r.new_top) |nt| {
+            const aps_right = lambda.getAPs(.{ .state = s_right, .top = nt });
+            if (!a_right.containsAPsExactly(aps_right)) return null;
+        }
 
         if (!a_left.glNext(a_right.*)) return null;
         if (!a_left.absNext(a_right.*)) return null;
@@ -1005,6 +992,184 @@ pub const SM_GBPDS_Processor = struct {
         return accept_atoms;
     }
 
+    pub fn construct_optimized(
+        self: *@This(),
+        sm_pds_proc: *const processor.SM_PDS_Processor,
+        atoms: []const Atom,
+        lambda: processor.LabellingFunction,
+        inits: []const StateName,
+    ) !void {
+        const sm_pds = sm_pds_proc.system.?;
+        const label_arr: []const ExitLabel = &.{ ExitLabel.exit, ExitLabel.unexit };
+
+        self.sm_pds_proc = sm_pds_proc;
+
+        self.accept_atoms = try self.constructAcceptAtoms(atoms);
+
+        var rules_by_src = std.AutoHashMap(processor.State, std.ArrayList(usize)).init(self.gpa);
+        for (sm_pds.rules.items, 0..) |lr, i| {
+            const src = switch (lr.rule) {
+                .int => |r| r.from,
+                .call => |r| r.from,
+                .ret => |r| r.from,
+                .sm => |r| r.from,
+            };
+            const gop = try rules_by_src.getOrPut(src);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(usize).init(self.gpa);
+            }
+            try gop.value_ptr.append(i);
+        }
+
+        defer {
+            var it = rules_by_src.iterator();
+            while (it.next()) |k| {
+                k.value_ptr.deinit();
+            }
+            rules_by_src.deinit();
+        }
+
+        var visited_states = std.AutoHashMap(StateName, void).init(self.gpa);
+        defer visited_states.deinit();
+
+        var pushed_ret_symbols = std.AutoArrayHashMap(SymbolName, void).init(self.gpa);
+        defer pushed_ret_symbols.deinit();
+
+        var ret_rules = std.AutoArrayHashMap(StandardRule, void).init(self.gpa);
+        defer ret_rules.deinit();
+
+        var stack = std.ArrayList(StateName).init(self.gpa);
+        defer stack.deinit();
+
+        for (inits) |ini| {
+            try stack.append(ini);
+        }
+
+        while (stack.pop()) |cur| {
+            if (visited_states.contains(cur)) {
+                continue;
+            }
+            try visited_states.put(cur, {});
+            const st = cur.*;
+            const rules = rules_by_src.get(st.control_point) orelse std.ArrayList(usize).init(self.gpa);
+            for (rules.items) |lr_num| {
+                const lr = sm_pds.rules.items[lr_num];
+                const r_name = lr.label;
+                const rule = lr.rule;
+                switch (rule) {
+                    .call => |r| {
+                        for (atoms) |*a_right| {
+                            for (label_arr) |l_right| {
+                                const new_r_opt = try self.constructCallRule(
+                                    r,
+                                    r_name,
+                                    st.atom,
+                                    a_right,
+                                    st.label,
+                                    l_right,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                    try stack.append(new_r.to);
+                                    try pushed_ret_symbols.put(new_r.new_tail.?, {});
+                                }
+                            }
+                        }
+                    },
+                    .int => |r| {
+                        for (atoms) |*a_right| {
+                            const new_r_opt = try self.constructIntRule(
+                                r,
+                                r_name,
+                                st.atom,
+                                a_right,
+                                st.label,
+                                lambda,
+                            );
+                            if (new_r_opt) |new_r| {
+                                try self.storeRule(Rule{ .standard = new_r });
+                                try stack.append(new_r.to);
+                            }
+                        }
+                    },
+                    .ret => |r| {
+                        for (atoms) |*a_right| {
+                            for (label_arr) |l_right| {
+                                const new_r_opt = try self.constructRetRulePop(
+                                    r,
+                                    r_name,
+                                    st.atom,
+                                    a_right,
+                                    l_right,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                    try stack.append(new_r.to);
+                                    try ret_rules.put(new_r, {});
+                                }
+
+                                // for (sm_pds.alphabet) |gamma| {
+                                // Figure this out
+                                // const new_r_decode_opt = try self.constructRetRuleDecode(
+                                //     r,
+                                //     r_name,
+                                //     gamma,
+                                //     a_right,
+                                //     a_right,
+                                //     l_right,
+                                //     l_right,
+                                //     lambda,
+                                // );
+                                // if (new_r_decode_opt) |new_r| {
+                                //     try self.storeRule(Rule{ .standard = new_r });
+                                //     try stack.append(new_r.to);
+                                // }
+                                // }
+                            }
+                        }
+                    },
+                    .sm => |r| {
+                        for (atoms) |*a_right| {
+                            for (sm_pds.alphabet) |gamma| {
+                                const new_r_opt = try self.constructSMRuleGamma(
+                                    r,
+                                    gamma,
+                                    r_name,
+                                    st.atom,
+                                    a_right,
+                                    st.label,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                    const new_r_sm = try self.constructSMRuleSM(r, r_name, a_right, st.label);
+                                    try self.storeRule(Rule{ .sm = new_r_sm });
+                                    try stack.append(new_r_sm.to);
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+
+        for (pushed_ret_symbols.keys()) |ret_sym| {
+            const sym = ret_sym.*;
+            for (ret_rules.keys()) |ret_rule| {
+                const new_r_decode_opt = try self.constructRetRuleDecode(
+                    ret_rule,
+                    sym.ret,
+                    lambda,
+                );
+                if (new_r_decode_opt) |new_r| {
+                    try self.storeRule(Rule{ .standard = new_r });
+                }
+            }
+        }
+    }
+
     pub fn construct(
         self: *@This(),
         sm_pds_proc: *const processor.SM_PDS_Processor,
@@ -1062,13 +1227,31 @@ pub const SM_GBPDS_Processor = struct {
 
                                 for (sm_pds.alphabet) |gamma| {
                                     const new_r_decode_opt = try self.constructRetRuleDecode(
-                                        r,
-                                        r_name,
-                                        gamma,
-                                        a_left,
-                                        a_right,
-                                        l_right,
-                                        l_right,
+                                        StandardRule{
+                                            .to = try self.getStateName(State{
+                                                .control_point = r.to,
+                                                .atom = a_right,
+                                                .label = l_right,
+                                            }),
+                                            .top = try self.getSymbolName(Symbol{ .ret = RetSymbol{
+                                                .symbol = gamma,
+                                                .atom = a_right,
+                                                .label = l_right,
+                                            } }),
+                                            .from = try self.getStateName(State{
+                                                .control_point = r.to,
+                                                .atom = a_right,
+                                                .label = l_right,
+                                            }),
+                                            .label = r_name,
+                                            .new_tail = null,
+                                            .new_top = null,
+                                        },
+                                        RetSymbol{
+                                            .symbol = gamma,
+                                            .atom = a_right,
+                                            .label = l_right,
+                                        },
                                         lambda,
                                     );
                                     if (new_r_decode_opt) |new_r| {
@@ -1127,24 +1310,25 @@ pub const SM_GBPDS_Processor = struct {
     }
 
     pub fn simplify(self: *@This(), inits: []const StateName) !void {
-        var arena = std.heap.ArenaAllocator.init(self.arena);
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
 
         var i: usize = 0;
 
-        while (try self.simplifyStep(arena.allocator(), inits) > 0) : (_ = arena.reset(.retain_capacity)) {
+        while (try self.simplifyStep(self.gpa, arena.allocator(), inits) > 0) : (_ = arena.reset(.retain_capacity)) {
             i += 1;
             // std.debug.print("Simplify {}:\n", .{i});
         }
     }
 
-    fn simplifyStep(self: *@This(), arena: std.mem.Allocator, inits: []const StateName) !u32 {
+    fn simplifyStep(self: *@This(), gpa: std.mem.Allocator, arena: std.mem.Allocator, inits: []const StateName) !u32 {
         // var timer = try std.time.Timer.start();
         var deleted: u32 = 0;
+        _ = arena;
 
-        var ret_sym_pushed = std.AutoHashMap(RetSymbol, void).init(arena);
+        var ret_sym_pushed = std.AutoHashMap(RetSymbol, void).init(gpa);
         defer ret_sym_pushed.deinit();
-        var ret_sym_read = std.AutoHashMap(RetSymbol, void).init(arena);
+        var ret_sym_read = std.AutoHashMap(RetSymbol, void).init(gpa);
         defer ret_sym_read.deinit();
 
         for (self.rule_set.keys()) |rule| {
@@ -1171,10 +1355,10 @@ pub const SM_GBPDS_Processor = struct {
 
         // std.debug.print("Ret Sym scan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
-        var srcs_used = std.AutoHashMap(StateName, void).init(arena);
+        var srcs_used = std.AutoHashMap(StateName, void).init(gpa);
         defer srcs_used.deinit();
 
-        var trg_used = std.AutoHashMap(StateName, void).init(arena);
+        var trg_used = std.AutoHashMap(StateName, void).init(gpa);
         defer trg_used.deinit();
 
         for (inits) |i| {
@@ -1197,7 +1381,7 @@ pub const SM_GBPDS_Processor = struct {
         }
         // std.debug.print("State scan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
-        var to_del = std.ArrayList(Rule).init(arena);
+        var to_del = std.ArrayList(Rule).init(gpa);
         defer to_del.deinit();
 
         for (self.rule_set.keys()) |rule| {
@@ -1234,6 +1418,13 @@ pub const SM_GBPDS_Processor = struct {
             }
         }
         // std.debug.print("Rule scan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+
+        // var it = to_del.iterator(0);
+        // while (it.next()) |r| {
+        //     if (self.rule_set.swapRemove(r.*)) {
+        //         deleted += 1;
+        //     }
+        // }
 
         for (to_del.items) |r| {
             if (self.rule_set.swapRemove(r)) {

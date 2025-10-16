@@ -56,7 +56,9 @@ pub const GlobalState = struct {
     progress: ?std.Progress.Node,
 };
 
+var state_initialized = false;
 pub var state: GlobalState = undefined;
+var timerv: std.time.Timer = undefined;
 
 pub fn main() !void {
     const limit = std.os.linux.rlimit{
@@ -68,20 +70,19 @@ pub fn main() !void {
         return RlimitError.FailedToSetRlimit;
     }
 
-    var timer = try std.time.Timer.start();
+    timerv = try std.time.Timer.start();
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
+    state_initialized = true;
     state = GlobalState{
-        .timer = &timer,
+        .timer = &timerv,
         .arena = &arena,
         .errors = &.{},
         .progress = null, //std.Progress.start(.{ .root_name = "model checking" }),
     };
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    _ = &gpa;
-    _ = &timer;
 
     const args = try std.process.argsAlloc(arena.allocator());
     defer std.process.argsFree(arena.allocator(), args);
@@ -96,25 +97,25 @@ pub fn main() !void {
     var result: bool = undefined;
     if (pytest) {
         if (naive) {
-            result = caret_model_check_pytest_naive(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| blk: {
+            result = caret_model_check_pytest_naive(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| {
                 print_errors(e);
-                break :blk false;
+                return e;
             };
         } else {
-            result = caret_model_check_pytest(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| blk: {
+            result = caret_model_check_pytest(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| {
                 print_errors(e);
-                break :blk false;
+                return e;
             };
         }
     } else if (bin) {
-        result = caret_model_check_bin(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| blk: {
+        result = caret_model_check_bin(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| {
             print_errors(e);
-            break :blk false;
+            return e;
         };
     } else {
-        result = caret_model_check_smpds_file(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| blk: {
+        result = caret_model_check_smpds_file(gpa.allocator(), arena.allocator(), input_filename.?) catch |e| {
             print_errors(e);
-            break :blk false;
+            return e;
         };
     }
 
@@ -123,7 +124,7 @@ pub fn main() !void {
     try stdout.print("{s}\n", .{if (result) "True" else "False"});
 
     if (pytest) {
-        const f_time: f64 = @floatFromInt(timer.lap());
+        const f_time: f64 = @floatFromInt(timerv.lap());
         const f_mem: f64 = @floatFromInt(arena.queryCapacity());
         try stdout.print("Memory used: {d:.3} KB\n", .{f_mem / 1024});
         try stdout.print("Time took: {d:.3}s\n", .{f_time / 1000000000});
@@ -133,7 +134,7 @@ pub fn main() !void {
 pub fn print_errors(_: anyerror) void {
     std.log.err("OOM", .{});
 
-    const f_time: f64 = @floatFromInt(state.timer.lap());
+    const f_time: f64 = @floatFromInt(state.timer.read());
     const f_mem: f64 = @floatFromInt(state.arena.queryCapacity());
     std.log.err("Memory used: {d:.3} KB", .{f_mem / 1024});
     std.log.err("Time took: {d:.3}s", .{f_time / 1000000000});
@@ -153,6 +154,9 @@ pub fn caret_model_check(
     formula: processor.Caret.Formula,
     lambda: processor.LabellingFunction,
 ) !bool {
+    if (state_initialized) {
+        std.log.info("Buchi Start: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
     defer gbpds.deinit();
 
@@ -175,11 +179,10 @@ pub fn caret_model_check(
         }
         gpa.free(atoms);
     }
-
+    if (state_initialized) {
+        std.log.info("Got closure and atoms: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     // std.debug.print("Atoms: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
-
-    try gbpds.construct(proc, atoms, lambda);
-    // std.debug.print("GBBPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var ginits = std.ArrayList(gbuchi.StateName).init(gpa);
     defer ginits.deinit();
@@ -195,14 +198,23 @@ pub fn caret_model_check(
         }));
     }
 
+    try gbpds.construct_optimized(proc, atoms, lambda, ginits.items);
+    if (state_initialized) {
+        std.log.info("GBPDS constructed: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    } // std.debug.print("GBBPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+
     try gbpds.simplify(ginits.items);
     // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
-
+    if (state_initialized) {
+        std.log.info("GBPDS csimplified: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     var smb = sm_bpds.SM_BPDS_Processor.init(gpa, arena, &gbpds);
     defer smb.deinit();
 
     try smb.construct();
-    // std.debug.print("SM-BPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    if (state_initialized) {
+        std.log.info("SM-BPDS constructed: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    } // std.debug.print("SM-BPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var binits = std.ArrayList(sm_bpds.StateName).init(gpa);
     defer binits.deinit();
@@ -222,19 +234,25 @@ pub fn caret_model_check(
     }
 
     try smb.simplify(binits.items);
-    // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    if (state_initialized) {
+        std.log.info("SM-BPDS simplified: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    } // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var ma = sm_bpds.MA.init(arena, gpa);
     defer ma.deinit();
 
     try ma.saturate(&smb, false);
-    // std.debug.print("HR MA: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    if (state_initialized) {
+        std.log.info("HR MA constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    } // std.debug.print("HR MA: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var hrg = hr.HeadReachabilityGraph.init(arena, gpa, &ma, &smb);
     defer hrg.deinit();
 
     try hrg.construct();
-    // std.debug.print("HRG: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    if (state_initialized) {
+        std.log.info("HR graph constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    } // std.debug.print("HRG: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const sccs = try hrg.findRepeatingHeads(gpa);
     defer {
@@ -245,13 +263,18 @@ pub fn caret_model_check(
     }
     // std.debug.print("Tarjan: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
+    if (state_initialized) {
+        std.log.info("Tarjan finished {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     var hr_ma = sm_bpds.MA.init(arena, gpa);
     defer hr_ma.deinit();
 
     try hr.build_hr_pre(&hr_ma, sccs);
 
     try hr_ma.saturate(&smb, true);
-    // std.debug.print("Pre(HG): {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    if (state_initialized) {
+        std.log.info("Final MA constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    } // std.debug.print("Pre(HG): {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const smb_init_word = try arena.alloc(sm_bpds.SymbolName, conf.stack.len);
 
@@ -283,6 +306,9 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
     defer proc.deinit();
 
     const unprocessed = unprocessed_conf.smpds;
+    if (state_initialized) {
+        std.log.info("Start: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     try proc.process(unprocessed, unprocessed_conf.init);
     var conf = try proc.getInit(unprocessed_conf.init);
 
@@ -291,6 +317,9 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
     var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc, unprocessed_conf.caret.valuations, &conf);
     defer lambda.deinit();
 
+    if (state_initialized) {
+        std.log.info("Preprocess finished: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
 }
 
@@ -390,11 +419,11 @@ pub fn caret_model_check_pytest_naive(gpa: std.mem.Allocator, arena: std.mem.All
     defer pds_proc.deinit();
 
     try pds_proc.process(pds.smpds, pds.init);
-    const pds_conf = try pds_proc.getInit(pds.init);
+    var pds_conf = try pds_proc.getInit(pds.init);
 
-    const formula = try processor.processCaret(arena, pds.caret);
+    const formula = try processor.processCaret(arena, pds.caret.formula);
 
-    var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive);
+    var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive, pds.caret.valuations, &pds_conf);
     defer lambda.deinit();
 
     const res = try caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
@@ -652,17 +681,6 @@ test "debug" {
     var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lab_func, unprocessed_conf.caret.valuations, &conf);
     defer lambda.deinit();
 
-    // const aps = lambda.getAPs(conf.state);
-    // for (aps.keys()) |ap| {
-    //     std.debug.print("AP: {s}\n", .{ap});
-    // }
-    // for (atoms) |a| {
-    //     std.debug.print("{}\n", .{a});
-    //     std.debug.print("{}\n", .{a.containsAPsExactly(lambda.getAPs(conf.state))});
-    // }
-
-    try gbpds.construct(&proc, atoms, lambda);
-
     var ginits = std.ArrayList(gbuchi.StateName).init(gpa);
     defer ginits.deinit();
 
@@ -676,6 +694,17 @@ test "debug" {
             .label = .unexit,
         }));
     }
+
+    // const aps = lambda.getAPs(conf.state);
+    // for (aps.keys()) |ap| {
+    //     std.debug.print("AP: {s}\n", .{ap});
+    // }
+    // for (atoms) |a| {
+    //     std.debug.print("{}\n", .{a});
+    //     std.debug.print("{}\n", .{a.containsAPsExactly(lambda.getAPs(conf.state))});
+    // }
+
+    try gbpds.construct_optimized(&proc, atoms, lambda, ginits.items);
 
     try gbpds.simplify(ginits.items);
 
