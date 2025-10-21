@@ -332,12 +332,12 @@ pub const MA = struct {
         st: StateNode,
     };
 
-    const EdgeSymbol = union(enum) {
+    pub const EdgeSymbol = union(enum) {
         symbol: SymbolName,
         star: void,
     };
 
-    const Edge = struct {
+    pub const Edge = struct {
         from: Node,
         symbol: EdgeSymbol,
         accepting: bool,

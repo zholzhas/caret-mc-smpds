@@ -1,5 +1,6 @@
 const buchi = @import("sm_bpds.zig");
 const std = @import("std");
+const root = @import("main.zig");
 
 pub const Head = struct {
     state: buchi.StateName,
@@ -26,17 +27,18 @@ pub const HeadReachabilityGraph = struct {
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
 
-    pre_ma: *const buchi.MA,
+    pre_ma: *buchi.MA,
     sm_bpds: *const buchi.SM_BPDS_Processor,
 
     heads: std.AutoArrayHashMap(Head, *Head),
 
     edges: std.AutoArrayHashMap(Edge, *const Edge),
     edges_by_src: std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)),
+    edges_by_trg: std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)),
 
     heads_by_state: std.AutoHashMap(HeadState, std.SinglyLinkedList(*const Head)),
 
-    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, pre_ma: *const buchi.MA, sm_bpds: *const buchi.SM_BPDS_Processor) @This() {
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, pre_ma: *buchi.MA, sm_bpds: *const buchi.SM_BPDS_Processor) @This() {
         return @This(){
             .arena = arena,
             .gpa = gpa,
@@ -46,6 +48,7 @@ pub const HeadReachabilityGraph = struct {
 
             .edges = std.AutoArrayHashMap(Edge, *const Edge).init(gpa),
             .edges_by_src = std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)).init(gpa),
+            .edges_by_trg = std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)).init(gpa),
 
             .heads_by_state = std.AutoHashMap(HeadState, std.SinglyLinkedList(*const Head)).init(gpa),
             .heads = std.AutoArrayHashMap(Head, *Head).init(gpa),
@@ -55,6 +58,7 @@ pub const HeadReachabilityGraph = struct {
     pub fn deinit(self: *@This()) void {
         self.edges.deinit();
         self.edges_by_src.deinit();
+        self.edges_by_trg.deinit();
         self.heads_by_state.deinit();
         self.heads.deinit();
     }
@@ -101,6 +105,18 @@ pub const HeadReachabilityGraph = struct {
         }
 
         {
+            const gop = try self.edges_by_trg.getOrPut(edge.to);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
+            }
+            const node_ptr = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
+            node_ptr.* = std.SinglyLinkedList(*const Edge).Node{
+                .data = edge_ptr,
+            };
+            gop.value_ptr.prepend(node_ptr);
+        }
+
+        {
             const gop = try self.heads_by_state.getOrPut(HeadState{ .state = edge.from.state, .phase = edge.from.phase });
             if (!gop.found_existing) {
                 gop.value_ptr.* = std.SinglyLinkedList(*const Head){};
@@ -125,6 +141,320 @@ pub const HeadReachabilityGraph = struct {
         }
 
         return true;
+    }
+
+    pub fn constructSchwoon(self: *@This()) !void {
+        //  rel = self.pre_ma
+
+        var trans = std.ArrayList(buchi.MA.Edge).init(self.gpa);
+        defer trans.deinit();
+
+        // delta_aux = self.edges
+
+        const RuleTail = struct {
+            to: buchi.StateName,
+            new_top: ?buchi.SymbolName, // null for self-modifying rules
+        };
+
+        var rules_by_tail = std.AutoHashMap(RuleTail, std.ArrayList(*const buchi.Rule)).init(self.gpa);
+        defer {
+            var it = rules_by_tail.iterator();
+            while (it.next()) |e| {
+                e.value_ptr.deinit();
+            }
+            rules_by_tail.deinit();
+        }
+
+        for (self.sm_bpds.rules.keys()) |*rule| {
+            switch (rule.*) {
+                .sm => |r| {
+                    const tail = RuleTail{
+                        .to = r.to,
+                        .new_top = null,
+                    };
+                    const gop = try rules_by_tail.getOrPut(tail);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = std.ArrayList(*const buchi.Rule).init(self.gpa);
+                    }
+                    try gop.value_ptr.append(rule);
+                },
+                .standard => |r| {
+                    if (r.new_top == null) continue;
+                    const tail = RuleTail{
+                        .to = r.to,
+                        .new_top = r.new_top.?,
+                    };
+                    const gop = try rules_by_tail.getOrPut(tail);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = std.ArrayList(*const buchi.Rule).init(self.gpa);
+                    }
+                    try gop.value_ptr.append(rule);
+                },
+            }
+        }
+
+        if (root.state_initialized) {
+            std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
+
+        for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
+            const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
+
+            rule_loop: for (self.sm_bpds.rules.keys()) |*rule| {
+                switch (rule.*) {
+                    .sm => {},
+                    .standard => |r| {
+                        if (!phase.items.contains(r.label)) {
+                            continue :rule_loop;
+                        }
+                        if (r.new_top == null) {
+                            try trans.append(buchi.MA.Edge{
+                                .from = buchi.MA.Node{
+                                    .st = buchi.MA.StateNode{
+                                        .state = r.from,
+                                        .phase = phase_name,
+                                    },
+                                },
+                                .symbol = buchi.MA.EdgeSymbol{
+                                    .symbol = r.top,
+                                },
+                                .to = buchi.MA.Node{
+                                    .st = buchi.MA.StateNode{
+                                        .state = r.to,
+                                        .phase = phase_name,
+                                    },
+                                },
+                                .accepting = self.sm_bpds.isAccepting(r.from.*),
+                            });
+                        }
+                    },
+                }
+            }
+        }
+
+        if (root.state_initialized) {
+            std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
+
+        while (trans.pop()) |edge| {
+            if (trans.capacity > trans.items.len * 3) {
+                trans.shrinkAndFree(trans.items.len);
+            }
+            if (self.pre_ma.edge_set.contains(edge)) {
+                continue;
+            }
+            _ = try self.pre_ma.addEdge(edge);
+
+            const hr_edges_opt = self.edges_by_trg.get(try self.addHead(Head{
+                .state = edge.from.st.state,
+                .phase = edge.from.st.phase,
+                .top = edge.symbol.symbol,
+            }));
+            if (hr_edges_opt) |hr_edges| {
+                var cur_hr_edge = hr_edges.first;
+                while (cur_hr_edge) |hr_edge| : (cur_hr_edge = hr_edge.next) {
+                    try trans.append(buchi.MA.Edge{
+                        .from = buchi.MA.Node{
+                            .st = buchi.MA.StateNode{
+                                .state = hr_edge.data.from.state,
+                                .phase = hr_edge.data.from.phase,
+                            },
+                        },
+                        .symbol = buchi.MA.EdgeSymbol{
+                            .symbol = hr_edge.data.from.top,
+                        },
+                        .to = edge.to,
+                        .accepting = edge.accepting or hr_edge.data.label,
+                    });
+                }
+            }
+
+            // sm rules
+            if (rules_by_tail.get(.{ .to = edge.from.st.state, .new_top = null })) |tail_rules| {
+                for (tail_rules.items) |r| {
+                    for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |prev_phase| {
+                        const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(prev_phase).?;
+                        if (!phase.items.contains(r.sm.label)) {
+                            continue;
+                        }
+                        const candidate_phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.get(.{
+                            .original_phase = prev_phase,
+                            .to_remove = r.sm.old_rules,
+                            .to_add = r.sm.new_rules,
+                        }) orelse {
+                            continue;
+                            // std.debug.print("Try {}, {}, {}\nIn\n", .{ prev_phase, r.sm.old_rules, r.sm.new_rules });
+                            // var it = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.iterator();
+                            // while (it.next()) |entr| {
+                            //     std.debug.print("<{} -> {}>\n", .{ entr.key_ptr.*, entr.value_ptr.* });
+                            // }
+                            // unreachable;
+                        };
+                        if (candidate_phase == edge.from.st.phase) {
+                            try trans.append(buchi.MA.Edge{
+                                .from = buchi.MA.Node{
+                                    .st = buchi.MA.StateNode{
+                                        .state = r.sm.from,
+                                        .phase = prev_phase,
+                                    },
+                                },
+                                .symbol = edge.symbol,
+                                .to = edge.to,
+                                .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // standard rules
+            if (rules_by_tail.get(.{ .to = edge.from.st.state, .new_top = edge.symbol.symbol })) |tail_rules| {
+                const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(edge.from.st.phase).?;
+
+                for (tail_rules.items) |r| {
+                    if (!phase.items.contains(r.standard.label)) {
+                        continue;
+                    }
+                    if (r.standard.new_tail == null) {
+                        try trans.append(buchi.MA.Edge{
+                            .from = buchi.MA.Node{
+                                .st = buchi.MA.StateNode{
+                                    .state = r.standard.from,
+                                    .phase = edge.from.st.phase,
+                                },
+                            },
+                            .symbol = buchi.MA.EdgeSymbol{
+                                .symbol = r.standard.top,
+                            },
+                            .to = edge.to,
+                            .accepting = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                        });
+                    } else {
+                        _ = try self.addEdge(Edge{
+                            .from = try self.addHead(Head{
+                                .state = r.standard.from,
+                                .phase = edge.from.st.phase,
+                                .top = r.standard.top,
+                            }),
+                            .to = try self.addHead(Head{
+                                .state = edge.to.st.state,
+                                .phase = edge.to.st.phase,
+                                .top = r.standard.new_tail.?,
+                            }),
+                            .label = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                        });
+
+                        const aux_edges_opt = self.pre_ma.edges_by_head.get(.{
+                            .from = edge.to,
+                            .symbol = buchi.MA.EdgeSymbol{ .symbol = r.standard.new_tail.? },
+                        });
+                        if (aux_edges_opt) |aux_edges| {
+                            var edge_it = aux_edges.first;
+                            while (edge_it) |edge_aux| : (edge_it = edge_aux.next) {
+                                try trans.append(buchi.MA.Edge{
+                                    .from = buchi.MA.Node{
+                                        .st = buchi.MA.StateNode{
+                                            .state = r.standard.from,
+                                            .phase = edge.from.st.phase,
+                                        },
+                                    },
+                                    .symbol = buchi.MA.EdgeSymbol{
+                                        .symbol = r.standard.top,
+                                    },
+                                    .to = edge_aux.data.to,
+                                    .accepting = edge.accepting or edge_aux.data.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------
+
+        if (root.state_initialized) {
+            std.log.info("Adding default hr edges: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
+        for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
+            const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
+
+            rule_loop: for (self.sm_bpds.rules.keys()) |rule| {
+                switch (rule) {
+                    .sm => {},
+                    .standard => |r| {
+                        if (!phase.items.contains(r.label)) {
+                            continue :rule_loop;
+                        }
+                        if (r.new_top != null) {
+                            _ = try self.addEdge(Edge{
+                                .from = try self.addHead(Head{
+                                    .state = r.from,
+                                    .phase = phase_name,
+                                    .top = r.top,
+                                }),
+                                .label = self.sm_bpds.isAccepting(r.from.*),
+                                .to = try self.addHead(Head{
+                                    .state = r.to,
+                                    .phase = phase_name,
+                                    .top = r.new_top.?,
+                                }),
+                            });
+                        }
+                    },
+                }
+            }
+        }
+
+        for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
+            const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
+            rule_loop: for (self.sm_bpds.rules.keys()) |rule| {
+                switch (rule) {
+                    .standard => {},
+                    .sm => |r| {
+                        if (!phase.items.contains(r.label)) {
+                            continue :rule_loop;
+                        }
+                        const next_phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.get(.{
+                            .original_phase = phase_name,
+                            .to_add = r.new_rules,
+                            .to_remove = r.old_rules,
+                        }) orelse continue :rule_loop; // continue because it means for rule p -(r1 / r2)-> p1 there is no r1 in phase.
+
+                        from_heads: {
+                            const head_list = (self.heads_by_state.get(HeadState{ .state = r.from, .phase = phase_name }) orelse break :from_heads);
+                            var head_it = head_list.first;
+                            while (head_it) |head_node| : (head_it = head_node.next) {
+                                _ = try self.addEdge(Edge{
+                                    .from = head_node.data,
+                                    .label = self.sm_bpds.isAccepting(r.from.*),
+                                    .to = try self.addHead(Head{
+                                        .state = r.to,
+                                        .phase = next_phase,
+                                        .top = head_node.data.top,
+                                    }),
+                                });
+                            }
+                        }
+                        to_heads: {
+                            const head_list = (self.heads_by_state.get(HeadState{ .state = r.to, .phase = next_phase }) orelse break :to_heads);
+                            var head_it = head_list.first;
+                            while (head_it) |head_node| : (head_it = head_node.next) {
+                                _ = try self.addEdge(Edge{
+                                    .from = try self.addHead(Head{
+                                        .state = r.from,
+                                        .phase = phase_name,
+                                        .top = head_node.data.top,
+                                    }),
+                                    .label = self.sm_bpds.isAccepting(r.from.*),
+                                    .to = head_node.data,
+                                });
+                            }
+                        }
+                    },
+                }
+            }
+        }
     }
 
     pub fn construct(self: *@This()) !void {

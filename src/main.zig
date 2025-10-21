@@ -56,14 +56,14 @@ pub const GlobalState = struct {
     progress: ?std.Progress.Node,
 };
 
-var state_initialized = false;
+pub var state_initialized = false;
 pub var state: GlobalState = undefined;
 var timerv: std.time.Timer = undefined;
 
 pub fn main() !void {
     const limit = std.os.linux.rlimit{
-        .cur = 12 * 1024 * 1024 * 1024,
-        .max = 14 * 1024 * 1024 * 1024,
+        .cur = 8 * 1024 * 1024 * 1024,
+        .max = 9 * 1024 * 1024 * 1024,
     };
     const rlimit_res = std.os.linux.setrlimit(.AS, &limit);
     if (rlimit_res != 0) {
@@ -155,6 +155,15 @@ pub fn caret_model_check(
     lambda: processor.LabellingFunction,
 ) !bool {
     if (state_initialized) {
+        std.log.info("P PRe MA Start: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
+
+    var p_pre_ma = processor.MA.init(arena, gpa);
+    defer p_pre_ma.deinit();
+
+    try p_pre_ma.saturate(proc);
+
+    if (state_initialized) {
         std.log.info("Buchi Start: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
     }
     var gbpds = gbuchi.SM_GBPDS_Processor.init(gpa, arena);
@@ -180,7 +189,7 @@ pub fn caret_model_check(
         gpa.free(atoms);
     }
     if (state_initialized) {
-        std.log.info("Got closure and atoms: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("Got closure ({}) and atoms ({}): {d:.3}s", .{ closure.len, atoms.len, @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
     }
     // std.debug.print("Atoms: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
@@ -190,6 +199,8 @@ pub fn caret_model_check(
     for (atoms) |*atom| {
         if (!atom.set.contains(formula)) continue;
         if (!atom.calFormsEmpty()) continue;
+        const aps_left = lambda.getAPs(.{ .state = conf.state, .top = conf.stack[0] });
+        if (!atom.containsAPsExactly(aps_left)) continue;
 
         try ginits.append(try gbpds.getStateName(gbuchi.State{
             .control_point = conf.state,
@@ -198,23 +209,29 @@ pub fn caret_model_check(
         }));
     }
 
-    try gbpds.construct_optimized(proc, atoms, lambda, ginits.items);
+    try gbpds.construct_optimized(proc, atoms, lambda, ginits.items, &p_pre_ma);
     if (state_initialized) {
-        std.log.info("GBPDS constructed: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("GBPDS constructed ({} rules taking {d:.3} MB): {d:.3}s", .{
+            gbpds.rule_set.count(),
+            @as(f64, @floatFromInt(gbpds.rule_set.capacity() * @sizeOf(gbuchi.Rule))) / (1024 * 1024),
+            @as(f64, @floatFromInt(state.timer.read())) / 1000000000,
+        });
     } // std.debug.print("GBBPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     try gbpds.simplify(ginits.items);
     // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
     if (state_initialized) {
-        std.log.info("GBPDS csimplified: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("GBPDS csimplified ({} rules): {d:.3}s", .{ gbpds.rule_set.count(), @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
     }
     var smb = sm_bpds.SM_BPDS_Processor.init(gpa, arena, &gbpds);
     defer smb.deinit();
 
     try smb.construct();
     if (state_initialized) {
-        std.log.info("SM-BPDS constructed: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("SM-BPDS constructed ({} rules): {d:.3}s", .{ smb.rules.count(), @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
     } // std.debug.print("SM-BPDS: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+
+    gbpds.rule_set.clearAndFree();
 
     var binits = std.ArrayList(sm_bpds.StateName).init(gpa);
     defer binits.deinit();
@@ -235,23 +252,23 @@ pub fn caret_model_check(
 
     try smb.simplify(binits.items);
     if (state_initialized) {
-        std.log.info("SM-BPDS simplified: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("SM-BPDS simplified ({} rules): {d:.3}s", .{ smb.rules.count(), @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
     } // std.debug.print("Simplification: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var ma = sm_bpds.MA.init(arena, gpa);
     defer ma.deinit();
 
-    try ma.saturate(&smb, false);
-    if (state_initialized) {
-        std.log.info("HR MA constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
-    } // std.debug.print("HR MA: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
+    // try ma.saturate(&smb, false);
+    // if (state_initialized) {
+    //     std.log.info("HR MA constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    // } // std.debug.print("HR MA: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     var hrg = hr.HeadReachabilityGraph.init(arena, gpa, &ma, &smb);
     defer hrg.deinit();
 
-    try hrg.construct();
+    try hrg.constructSchwoon();
     if (state_initialized) {
-        std.log.info("HR graph constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("HR graph constructed directly: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
     } // std.debug.print("HRG: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const sccs = try hrg.findRepeatingHeads(gpa);
@@ -317,8 +334,27 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
     var lambda = try processor.LabellingFunction.init(gpa, &proc, formula, lfunc, unprocessed_conf.caret.valuations, &conf);
     defer lambda.deinit();
 
+    // var printer = try processor.SM_PDS_Printer.init(gpa, &proc);
+    // defer printer.deinit();
+
+    // var count: usize = 0;
+    // for (lambda.state_aps.keys()) |pair| {
+    //     if (lambda.state_aps.get(pair).?.count() < 1) continue;
+    //     count += 1;
+    //     std.log.info("<{}, {}>: ", .{ printer.state(pair.state), printer.symbol(pair.top) });
+    //     for (lambda.state_aps.get(pair).?.keys()) |ap| {
+    //         std.log.info("{s}, ", .{ap});
+    //     }
+    //     std.log.info("\n", .{});
+    // }
+
+    // std.log.info("COUNT: {}", .{count});
+
     if (state_initialized) {
-        std.log.info("Preprocess finished: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+        std.log.info("Preprocess finished ({} rules in SM-PDS): {d:.3}s", .{
+            proc.system.?.rules.items.len,
+            @as(f64, @floatFromInt(state.timer.read())) / 1000000000,
+        });
     }
     return caret_model_check(gpa, arena, &proc, conf, formula, lambda);
 }
@@ -351,13 +387,13 @@ pub fn caret_model_check_smpds_file(gpa: std.mem.Allocator, arena: std.mem.Alloc
 // }
 
 pub fn caret_model_check_bin(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
-    const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
+    const unprocessed_conf = try parser.parseJsonFromPython(gpa, arena, filename);
 
     return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.substr);
 }
 
 pub fn caret_model_check_pytest(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
-    const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
+    const unprocessed_conf = try parser.parseJsonFromPython(gpa, arena, filename);
 
     return caret_model_check_unproc(gpa, arena, unprocessed_conf, processor.LabellingFunction.strict);
 }
@@ -400,7 +436,7 @@ pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allo
 pub fn caret_model_check_pytest_naive(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
     var timer = try std.time.Timer.start();
 
-    const unprocessed_conf = try parser.parseJsonFromPython(arena, filename);
+    const unprocessed_conf = try parser.parseJsonFromPython(gpa, arena, filename);
     var proc = processor.SM_PDS_Processor.init(arena, gpa);
 
     defer proc.deinit();

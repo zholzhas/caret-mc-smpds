@@ -262,27 +262,27 @@ pub fn parseJsonWithLabels(allocator: std.mem.Allocator, filename: []const u8) !
     };
 }
 
-pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !ParsedSMPDS {
+pub fn parseJsonFromPython(_: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !ParsedSMPDS {
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
 
-    var reader = std.json.reader(allocator, file.reader());
+    var reader = std.json.reader(arena, file.reader());
 
-    const val = try std.json.parseFromTokenSourceLeaky(std.json.Value, allocator, &reader, .{});
+    const val = try std.json.parseFromTokenSourceLeaky(std.json.Value, arena, &reader, .{});
 
     const smpds = val.array.items[0];
-    var states = try allocator.alloc([]const u8, smpds.array.items[0].array.items.len);
+    var states = try arena.alloc([]const u8, smpds.array.items[0].array.items.len);
 
     for (smpds.array.items[0].array.items, 0..) |s, j| {
-        states[j] = try allocator.dupe(u8, s.string);
+        states[j] = try arena.dupe(u8, s.string);
     }
 
-    var alphabet = try allocator.alloc([]const u8, smpds.array.items[1].array.items.len);
+    var alphabet = try arena.alloc([]const u8, smpds.array.items[1].array.items.len);
     for (smpds.array.items[1].array.items, 0..) |s, j| {
-        alphabet[j] = try allocator.dupe(u8, s.string);
+        alphabet[j] = try arena.dupe(u8, s.string);
     }
 
-    var rules = try allocator.alloc(Rule, smpds.array.items[2].object.count() + smpds.array.items[3].object.count());
+    var rules = try arena.alloc(Rule, smpds.array.items[2].object.count() + smpds.array.items[3].object.count());
 
     for (smpds.array.items[2].object.keys(), 0..) |name, j| {
         const r = smpds.array.items[2].object.get(name).?.array;
@@ -299,19 +299,19 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
             new_tail = null;
         } else {
             if (std.mem.indexOf(u8, r.items[3].string, " ")) |ind| {
-                new_top = try allocator.dupe(u8, r.items[3].string[0..ind]);
-                new_tail = try allocator.dupe(u8, r.items[3].string[ind + 1 ..]);
+                new_top = try arena.dupe(u8, r.items[3].string[0..ind]);
+                new_tail = try arena.dupe(u8, r.items[3].string[ind + 1 ..]);
             } else {
-                new_top = try allocator.dupe(u8, r.items[3].string);
+                new_top = try arena.dupe(u8, r.items[3].string);
                 new_tail = null;
             }
         }
 
         rules[j] = Rule{
-            .name = try allocator.dupe(u8, name),
-            .from = try allocator.dupe(u8, r.items[0].string),
-            .to = try allocator.dupe(u8, r.items[2].string),
-            .top = try allocator.dupe(u8, r.items[1].string),
+            .name = try arena.dupe(u8, name),
+            .from = try arena.dupe(u8, r.items[0].string),
+            .to = try arena.dupe(u8, r.items[2].string),
+            .top = try arena.dupe(u8, r.items[1].string),
             .new_top = new_top,
             .new_tail = new_tail,
             .typ = if (std.mem.eql(u8, r.items[4].string, "call")) RuleType.call else if (std.mem.eql(u8, r.items[4].string, "int")) RuleType.internal else if (std.mem.eql(u8, r.items[4].string, "ret")) RuleType.ret else {
@@ -326,12 +326,12 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
 
         const sm_l = blk: switch (r.items[1].array.items[0]) {
             .string => |s| {
-                break :blk try allocator.dupe([]const u8, &.{s});
+                break :blk try arena.dupe([]const u8, &.{s});
             },
             .array => |arr| {
-                var sm_l_tmp = try allocator.alloc([]const u8, arr.items.len);
+                var sm_l_tmp = try arena.alloc([]const u8, arr.items.len);
                 for (arr.items, 0..) |r_name, k| {
-                    sm_l_tmp[k] = try allocator.dupe(u8, r_name.string);
+                    sm_l_tmp[k] = try arena.dupe(u8, r_name.string);
                 }
                 break :blk sm_l_tmp;
             },
@@ -339,12 +339,12 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
         };
         const sm_r = blk: switch (r.items[1].array.items[1]) {
             .string => |s| {
-                break :blk try allocator.dupe([]const u8, &.{s});
+                break :blk try arena.dupe([]const u8, &.{s});
             },
             .array => |arr| {
-                var sm_r_tmp = try allocator.alloc([]const u8, arr.items.len);
+                var sm_r_tmp = try arena.alloc([]const u8, arr.items.len);
                 for (arr.items, 0..) |r_name, k| {
-                    sm_r_tmp[k] = try allocator.dupe(u8, r_name.string);
+                    sm_r_tmp[k] = try arena.dupe(u8, r_name.string);
                 }
                 break :blk sm_r_tmp;
             },
@@ -352,9 +352,9 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
         };
 
         rules[j] = Rule{
-            .name = try allocator.dupe(u8, name),
-            .from = try allocator.dupe(u8, r.items[0].string),
-            .to = try allocator.dupe(u8, r.items[2].string),
+            .name = try arena.dupe(u8, name),
+            .from = try arena.dupe(u8, r.items[0].string),
+            .to = try arena.dupe(u8, r.items[2].string),
             .typ = RuleType.sm,
             .sm_l = sm_l,
             .sm_r = sm_r,
@@ -364,7 +364,7 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
     const res_smpds = SM_PDS{ .states = states, .alphabet = alphabet, .rules = rules };
 
     const caret_str = val.array.items[1].string;
-    const res = try formulaRef.parse(allocator, caret_str);
+    const res = try formulaRef.parse(arena, caret_str);
     var caret: *const RawCaret = undefined;
     switch (res.value) {
         .ok => |caret_raw| {
@@ -396,16 +396,16 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
     }
     var seq = std.mem.splitSequence(u8, init.array.items[1].string, " ");
 
-    var stack = std.ArrayList([]const u8).init(allocator);
+    var stack = std.ArrayList([]const u8).init(arena);
     var itt: ?[]const u8 = seq.first();
     while (itt) |it| {
-        try stack.append(try allocator.dupe(u8, it));
+        try stack.append(try arena.dupe(u8, it));
         itt = seq.next();
     }
 
-    var phase = try allocator.alloc([]const u8, init.array.items[2].array.items.len);
+    var phase = try arena.alloc([]const u8, init.array.items[2].array.items.len);
     for (init.array.items[2].array.items, 0..) |rule, k| {
-        phase[k] = try allocator.dupe(u8, rule.string);
+        phase[k] = try arena.dupe(u8, rule.string);
     }
 
     const res_init = Conf{
@@ -423,11 +423,11 @@ pub fn parseJsonFromPython(allocator: std.mem.Allocator, filename: []const u8) !
     }
 
     const aps = val.array.items[3].array;
-    const valuations = try allocator.alloc(Valuation, aps.items.len);
+    const valuations = try arena.alloc(Valuation, aps.items.len);
     for (aps.items, 0..) |ap_pair, i| {
         switch (ap_pair) {
             .string => |ap_str| {
-                const val_res = try ap_definition_grammar_finished.parse(allocator, ap_str);
+                const val_res = try ap_definition_grammar_finished.parse(arena, ap_str);
                 switch (val_res.value) {
                     .ok => |valuation| {
                         valuations[i] = valuation;
@@ -484,6 +484,34 @@ pub const RawCaret = union(enum) {
     xa: *const RawCaret,
     xc: *const RawCaret,
 };
+
+pub fn freeCaret(gpa: std.mem.Allocator, f: *const RawCaret) void {
+    switch (f.*) {
+        .ap => |n| gpa.free(n),
+        .lnot => |n| freeCaret(gpa, n),
+        .xg => |n| freeCaret(gpa, n),
+        .xa => |n| freeCaret(gpa, n),
+        .xc => |n| freeCaret(gpa, n),
+        .ug => |n| {
+            freeCaret(gpa, n.left);
+            freeCaret(gpa, n.right);
+        },
+        .ua => |n| {
+            freeCaret(gpa, n.left);
+            freeCaret(gpa, n.right);
+        },
+        .uc => |n| {
+            freeCaret(gpa, n.left);
+            freeCaret(gpa, n.right);
+        },
+        .lor => |n| {
+            freeCaret(gpa, n.left);
+            freeCaret(gpa, n.right);
+        },
+        .top, .bot => {},
+    }
+    gpa.destroy(f);
+}
 
 fn fromStr(comptime parser: mecha.Parser([]const u8)) mecha.Parser(*const RawCaret) {
     const Res = mecha.Result(*const RawCaret);
@@ -750,13 +778,84 @@ fn formula2Ref() mecha.Parser(*const RawCaret) {
     return formula2;
 }
 
-const formula3 = mecha.oneOf(.{
+const formula3_old = mecha.oneOf(.{
     fromLor(mecha.combine(.{ formula2, ws, token(mecha.string("||")), mecha.ref(formula3Ref) })),
     fromUG(mecha.combine(.{ formula2, ws, token(mecha.string("Ug")), mecha.ref(formula3Ref) })),
     fromUA(mecha.combine(.{ formula2, ws, token(mecha.string("Ua")), mecha.ref(formula3Ref) })),
     fromUC(mecha.combine(.{ formula2, ws, token(mecha.string("Uc")), mecha.ref(formula3Ref) })),
     formula2,
 });
+
+const formula3 = fromF3New(mecha.combine(.{
+    formula2,
+    ws,
+    mecha.combine(.{
+        mecha.oneOf(.{
+            mecha.string("||"),
+            mecha.string("Ug"),
+            mecha.string("Ua"),
+            mecha.string("Uc"),
+        }),
+        ws,
+        mecha.ref(formula3Ref),
+    }).opt(),
+}));
+
+fn fromF3New(comptime parser: mecha.Parser(F3ParseResult)) mecha.Parser(*const RawCaret) {
+    const Res = mecha.Result(*const RawCaret);
+    return .{ .parse = struct {
+        fn parse(allocator: std.mem.Allocator, str: []const u8) !Res {
+            const res_comb: mecha.Result(F3ParseResult) = try parser.parse(allocator, str);
+
+            return switch (res_comb.value) {
+                .ok => |res| blk: {
+                    if (res.@"1") |tail| {
+                        const caret = try allocator.create(RawCaret);
+                        if (std.mem.eql(u8, tail.@"0", "||")) {
+                            caret.* = RawCaret{ .lor = .{
+                                .left = res.@"0",
+                                .right = tail.@"1",
+                            } };
+                            break :blk Res.ok(res_comb.index, caret);
+                        }
+                        if (std.mem.eql(u8, tail.@"0", "Ug")) {
+                            caret.* = RawCaret{ .ug = .{
+                                .left = res.@"0",
+                                .right = tail.@"1",
+                            } };
+                            break :blk Res.ok(res_comb.index, caret);
+                        }
+                        if (std.mem.eql(u8, tail.@"0", "Ua")) {
+                            caret.* = RawCaret{ .ua = .{
+                                .left = res.@"0",
+                                .right = tail.@"1",
+                            } };
+                            break :blk Res.ok(res_comb.index, caret);
+                        }
+                        if (std.mem.eql(u8, tail.@"0", "Uc")) {
+                            caret.* = RawCaret{ .uc = .{
+                                .left = res.@"0",
+                                .right = tail.@"1",
+                            } };
+                            break :blk Res.ok(res_comb.index, caret);
+                        }
+                        unreachable;
+                    } else {
+                        break :blk Res.ok(res_comb.index, res.@"0");
+                    }
+                },
+                .err => Res.err(res_comb.index),
+            };
+        }
+    }.parse };
+}
+
+const F3ParseResult = std.meta.Tuple(&.{ *const RawCaret, ?std.meta.Tuple(&.{ []const u8, *const RawCaret }) });
+
+fn formula3RefOld() mecha.Parser(*const RawCaret) {
+    return formula3_old;
+}
+
 fn formula3Ref() mecha.Parser(*const RawCaret) {
     return formula3;
 }
@@ -1769,7 +1868,7 @@ test "python parse" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const parsed = try parseJsonFromPython(allocator, "examples/python_example.json");
-
+    const parsed = try parseJsonFromPython(std.testing.allocator, allocator, "examples/python_example.json");
+    // defer freeCaret(std.testing.allocator, parsed.caret.formula);
     _ = parsed;
 }

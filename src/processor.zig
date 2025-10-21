@@ -439,6 +439,9 @@ pub const LabellingFunction = struct {
         try fillAps(&state_aps, formula, state_names, func);
 
         for (valuations) |val| {
+            if (!formula.hasAP(val.ap)) {
+                continue;
+            }
             switch (val.val) {
                 .state => |s| {
                     if (regular_symbols_map.count() > 0) {
@@ -446,6 +449,7 @@ pub const LabellingFunction = struct {
                             for (proc.states.state_map.keys()) |state_str| {
                                 if (func(s, state_str)) {
                                     const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = symbol }).?;
+                                    _ = &ap_set;
                                     try ap_set.*.put(val.ap, {});
                                 }
                             }
@@ -506,9 +510,11 @@ pub const LabellingFunction = struct {
                         }
                     }
                 },
+                // else => {},
             }
         }
 
+        // _ = init_conf;
         if (regular_symbols_map.count() > 0) {
             const prev_state = try dfa_set.getInit(gpa);
             defer gpa.free(prev_state);
@@ -846,6 +852,255 @@ pub const SM_PDS_Processor = struct {
     }
 };
 
+pub const MA = struct {
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+
+    edges_by_head: std.AutoHashMap(EdgeHead, std.SinglyLinkedList(*const Edge)),
+    edge_set: std.AutoHashMap(Edge, void),
+
+    pub const Node = State;
+
+    pub const EdgeSymbol = Symbol;
+
+    pub const Edge = struct {
+        from: Node,
+        symbol: EdgeSymbol,
+        to: Node,
+    };
+
+    const EdgeHead = struct {
+        from: Node,
+        symbol: ?EdgeSymbol,
+    };
+
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator) @This() {
+        return .{
+            .arena = arena,
+            .gpa = gpa,
+            .edges_by_head = std.AutoHashMap(EdgeHead, std.SinglyLinkedList(*const Edge)).init(gpa),
+            .edge_set = std.AutoHashMap(Edge, void).init(gpa),
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.edges_by_head.deinit();
+        self.edge_set.deinit();
+    }
+
+    fn storeEdge(self: *@This(), edge: Edge) !*const Edge {
+        const new_edge = try self.arena.create(Edge);
+        new_edge.* = edge;
+        return new_edge;
+    }
+
+    pub fn addEdge(self: *@This(), edge: Edge) !bool {
+        if (self.edge_set.contains(edge)) {
+            return false;
+        }
+        try self.edge_set.put(edge, {});
+
+        {
+            const head = EdgeHead{ .from = edge.from, .symbol = edge.symbol };
+
+            const new_edge = try self.storeEdge(edge);
+            const new_node = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
+            new_node.* = std.SinglyLinkedList(*const Edge).Node{
+                .data = new_edge,
+            };
+            const gop = try self.edges_by_head.getOrPut(head);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
+            }
+            gop.value_ptr.*.prepend(new_node);
+        }
+        {
+            const head = EdgeHead{ .from = edge.from, .symbol = null };
+
+            const new_edge = try self.storeEdge(edge);
+            const new_node = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
+            new_node.* = std.SinglyLinkedList(*const Edge).Node{
+                .data = new_edge,
+            };
+            const gop = try self.edges_by_head.getOrPut(head);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
+            }
+            gop.value_ptr.*.prepend(new_node);
+        }
+        return true;
+    }
+
+    pub const PathResult = struct {
+        end_node: Node,
+    };
+
+    fn hasPathAux(self: @This(), from: Node, word: []const Symbol, res: *std.AutoArrayHashMap(PathResult, void)) !void {
+        if (word.len == 0) {
+            try res.put(PathResult{
+                .end_node = from,
+            }, {});
+            return;
+        }
+
+        exact_symbols: {
+            var edge_list = self.edges_by_head.get(EdgeHead{
+                .from = from,
+                .symbol = word[0],
+            }) orelse break :exact_symbols;
+            while (edge_list.popFirst()) |edge_node| {
+                try self.hasPathAux(edge_node.data.to, word[1..], res);
+            }
+        }
+    }
+
+    pub fn hasPath(self: @This(), alloc: std.mem.Allocator, from: Node, word: []const Symbol) ![]PathResult {
+        var res = std.AutoArrayHashMap(PathResult, void).init(self.gpa);
+        defer res.deinit();
+
+        try self.hasPathAux(from, word, &res);
+        return try alloc.dupe(PathResult, res.keys());
+    }
+
+    pub fn accepts(self: @This(), from: Node, word: []const Symbol) !bool {
+        const paths = try self.hasPath(self.gpa, from, word);
+        defer self.gpa.free(paths);
+
+        for (paths) |path| {
+            switch (path.end_node) {
+                .int => |i| {
+                    if (i.accepting) return true;
+                },
+                .st => {},
+            }
+        }
+        return false;
+    }
+
+    pub var add_edge_time: usize = 0;
+    pub var path_time: usize = 0;
+    pub var sm_time: usize = 0;
+
+    fn saturateStep(self: *@This(), arena: std.mem.Allocator, sm_pds: *const SM_PDS_Processor) !usize {
+        var path_arena = std.heap.ArenaAllocator.init(arena);
+        defer path_arena.deinit();
+
+        var edges_added: usize = 0;
+
+        rule_loop: for (sm_pds.system.?.rules.items) |rule| {
+            switch (rule.rule) {
+                .int => |r| {
+                    _ = path_arena.reset(.retain_capacity);
+                    var word: [2]Symbol = undefined;
+                    var word_slice: []const Symbol = undefined;
+                    if (r.new_top != null and r.new_tail != null) {
+                        word = .{ r.new_top.?, r.new_tail.? };
+                        word_slice = &word;
+                    } else if (r.new_top != null) {
+                        word = .{ r.new_top.?, undefined };
+                        word_slice = word[0..1];
+                    } else {
+                        word_slice = word[0..0];
+                    }
+                    var t = try std.time.Timer.start();
+                    const to_node = r.to;
+
+                    const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
+
+                    path_time += t.lap();
+                    for (paths) |p| {
+                        const from_node = r.from;
+                        if (try self.addEdge(Edge{
+                            .from = from_node,
+                            .to = p.end_node,
+                            .symbol = r.top,
+                        })) {
+                            edges_added += 1;
+                        }
+                        add_edge_time += t.lap();
+                    }
+                },
+                .call => |r| {
+                    _ = path_arena.reset(.retain_capacity);
+                    var word: [2]Symbol = undefined;
+                    var word_slice: []const Symbol = undefined;
+                    word = .{ r.new_top, r.new_tail };
+                    word_slice = &word;
+                    var t = try std.time.Timer.start();
+                    const to_node = r.to;
+
+                    const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
+
+                    path_time += t.lap();
+                    for (paths) |p| {
+                        const from_node = r.from;
+                        if (try self.addEdge(Edge{
+                            .from = from_node,
+                            .to = p.end_node,
+                            .symbol = r.top,
+                        })) {
+                            edges_added += 1;
+                        }
+                        add_edge_time += t.lap();
+                    }
+                },
+                .ret => |r| {
+                    _ = path_arena.reset(.retain_capacity);
+                    var word: [0]Symbol = undefined;
+                    var word_slice: []const Symbol = undefined;
+                    word_slice = word[0..0];
+                    var t = try std.time.Timer.start();
+                    const to_node = r.to;
+
+                    const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
+
+                    path_time += t.lap();
+                    for (paths) |p| {
+                        const from_node = r.from;
+                        if (try self.addEdge(Edge{
+                            .from = from_node,
+                            .to = p.end_node,
+                            .symbol = r.top,
+                        })) {
+                            edges_added += 1;
+                        }
+                        add_edge_time += t.lap();
+                    }
+                },
+                .sm => |r| {
+                    var t = try std.time.Timer.start();
+                    const to_node = r.to;
+                    var edges = self.edges_by_head.get(EdgeHead{
+                        .from = to_node,
+                        .symbol = null,
+                    }) orelse continue :rule_loop;
+                    while (edges.popFirst()) |edge_node| {
+                        const edge = edge_node.data;
+                        const from_node = r.from;
+                        if (try self.addEdge(Edge{
+                            .from = from_node,
+                            .to = edge.to,
+                            .symbol = edge.symbol,
+                        })) {
+                            edges_added += 1;
+                        }
+                    }
+                    sm_time += t.lap();
+                },
+            }
+        }
+
+        return edges_added;
+    }
+
+    pub fn saturate(self: *@This(), sm_pds: *const SM_PDS_Processor) !void {
+        var arena = std.heap.ArenaAllocator.init(self.arena);
+        defer arena.deinit();
+
+        while (try self.saturateStep(arena.allocator(), sm_pds) > 0) : (_ = arena.reset(.retain_capacity)) {}
+    }
+};
+
 const StatePrinter = struct {
     printer: *SM_PDS_Printer,
     to_print: State,
@@ -974,12 +1229,12 @@ const RulePrinter = struct {
     }
 };
 
-const SM_PDS_Printer = struct {
-    proc: *SM_PDS_Processor,
+pub const SM_PDS_Printer = struct {
+    proc: *const SM_PDS_Processor,
     state_map: std.AutoHashMap(State, []const u8),
     rule_map: std.AutoHashMap(RuleName, []const u8),
 
-    pub fn init(gpa: std.mem.Allocator, proc: *SM_PDS_Processor) !SM_PDS_Printer {
+    pub fn init(gpa: std.mem.Allocator, proc: *const SM_PDS_Processor) !SM_PDS_Printer {
         var state_map = std.AutoHashMap(State, []const u8).init(gpa);
         for (proc.states.state_map.keys()) |k| {
             try state_map.put(proc.states.state_map.get(k).?, k);
@@ -1481,6 +1736,21 @@ pub const Caret = struct {
             try getClosureAux(gpa, self, &closure, &visited, false);
 
             return try closure.toOwnedSlice();
+        }
+
+        pub fn hasAP(self: @This(), ap: []const u8) bool {
+            return switch (self) {
+                .at => |a| std.mem.eql(u8, ap, a.name),
+                .lor => |s| s.left.hasAP(ap) or s.right.hasAP(ap),
+                .lnot => |s| s.neg.hasAP(ap),
+                .ug => |s| s.left.hasAP(ap) or s.right.hasAP(ap),
+                .ua => |s| s.left.hasAP(ap) or s.right.hasAP(ap),
+                .uc => |s| s.left.hasAP(ap) or s.right.hasAP(ap),
+                .xg => |s| s.next.hasAP(ap),
+                .xa => |s| s.next.hasAP(ap),
+                .xc => |s| s.next.hasAP(ap),
+                else => false,
+            };
         }
     };
 };
