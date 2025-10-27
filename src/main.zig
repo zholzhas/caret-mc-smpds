@@ -312,6 +312,10 @@ pub fn caret_model_check(
             .phase = conf.phase,
         } }, smb_init_word);
     }
+
+    if (state_initialized) {
+        std.log.info("Finish: {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
+    }
     // std.debug.print("Inits: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
     return res;
 }

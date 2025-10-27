@@ -1244,60 +1244,116 @@ pub const CaretLogic = struct {
     valuations: []const Valuation,
 };
 
-const ap_valuation = mecha.oneOf(.{
-    mecha.combine(.{ token(mecha.string("*")), ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
-        .map(struct {
-        fn map(res: []const u8) APValuation {
-            return APValuation{
-                .simple = SimpleValuation{
-                    .state = null,
-                    .top = res,
-                },
-            };
+pub const RegOrSimple = union(enum) {
+    reg: *const Regex,
+    simple: []const u8,
+};
+
+const ap_valuation =
+    mecha.combine(.{
+        mecha.oneOf(.{ id_grammar, mecha.string("*") }),
+        ws,
+        mecha.combine(.{
+            token(mecha.string(":")),
+            mecha.oneOf(.{
+                mecha.combine(.{
+                    token(mecha.string("/")),
+                    regex_grammar,
+                    token(mecha.string("/")),
+                }).map(struct {
+                    fn map(res: *const Regex) RegOrSimple {
+                        return RegOrSimple{ .reg = res };
+                    }
+                }.map),
+                mecha.combine(.{
+                    id_grammar,
+                    ws,
+                    token(mecha.string(".")),
+                    token(mecha.string("*")),
+                }).map(struct {
+                    fn map(res: []const u8) RegOrSimple {
+                        return RegOrSimple{ .simple = res };
+                    }
+                }.map),
+            }),
+        }).opt(),
+    }).map(struct {
+        fn map(res: std.meta.Tuple(&.{ []const u8, ?RegOrSimple })) APValuation {
+            const st = if (std.mem.eql(u8, res.@"0", "*")) null else res.@"0";
+            if (res.@"1") |rs| {
+                switch (rs) {
+                    .reg => |r| {
+                        return APValuation{ .regular = RegularValuation{
+                            .regex = r,
+                            .state = st,
+                        } };
+                    },
+                    .simple => |s| {
+                        return APValuation{ .simple = SimpleValuation{
+                            .top = s,
+                            .state = st,
+                        } };
+                    },
+                }
+            } else {
+                return APValuation{ .state = res.@"0" };
+            }
         }
-    }.map),
-    mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
-        .map(struct {
-        fn map(res: std.meta.Tuple(&.{ []const u8, []const u8 })) APValuation {
-            return APValuation{
-                .simple = SimpleValuation{
-                    .state = res.@"0",
-                    .top = res.@"1",
-                },
-            };
-        }
-    }.map),
-    mecha.combine(.{ token(mecha.string("*")), ws, token(mecha.string(":")), regex_grammar })
-        .map(struct {
-        fn map(res: *const Regex) APValuation {
-            return APValuation{
-                .regular = RegularValuation{
-                    .state = null,
-                    .regex = res,
-                },
-            };
-        }
-    }.map),
-    mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), regex_grammar })
-        .map(struct {
-        fn map(res: std.meta.Tuple(&.{ []const u8, *const Regex })) APValuation {
-            return APValuation{
-                .regular = RegularValuation{
-                    .state = res.@"0",
-                    .regex = res.@"1",
-                },
-            };
-        }
-    }.map),
-    mecha.combine(.{ id_grammar, ws })
-        .map(struct {
-        fn map(res: []const u8) APValuation {
-            return APValuation{
-                .state = res,
-            };
-        }
-    }.map),
-});
+    }.map);
+// mecha.oneOf(.{
+//     mecha.combine(.{ token(mecha.string("*")), ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
+//         .map(struct {
+//         fn map(res: []const u8) APValuation {
+//             return APValuation{
+//                 .simple = SimpleValuation{
+//                     .state = null,
+//                     .top = res,
+//                 },
+//             };
+//         }
+//     }.map),
+//     mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), id_grammar, ws, token(mecha.string(".")), token(mecha.string("*")) })
+//         .map(struct {
+//         fn map(res: std.meta.Tuple(&.{ []const u8, []const u8 })) APValuation {
+//             return APValuation{
+//                 .simple = SimpleValuation{
+//                     .state = res.@"0",
+//                     .top = res.@"1",
+//                 },
+//             };
+//         }
+//     }.map),
+//     mecha.combine(.{ token(mecha.string("*")), ws, token(mecha.string(":")), regex_grammar })
+//         .map(struct {
+//         fn map(res: *const Regex) APValuation {
+//             return APValuation{
+//                 .regular = RegularValuation{
+//                     .state = null,
+//                     .regex = res,
+//                 },
+//             };
+//         }
+//     }.map),
+//     mecha.combine(.{ id_grammar, ws, token(mecha.string(":")), regex_grammar })
+//         .map(struct {
+//         fn map(res: std.meta.Tuple(&.{ []const u8, *const Regex })) APValuation {
+//             return APValuation{
+//                 .regular = RegularValuation{
+//                     .state = res.@"0",
+//                     .regex = res.@"1",
+//                 },
+//             };
+//         }
+//     }.map),
+//     mecha.combine(.{ id_grammar, ws })
+//         .map(struct {
+//         fn map(res: []const u8) APValuation {
+//             return APValuation{
+//                 .state = res,
+//             };
+//         }
+//     }.map),
+// });
 
 const ap_definition_grammar = mecha.combine(.{
     id_grammar, ws, token(mecha.string(":=")), ap_valuation,
@@ -1560,7 +1616,7 @@ test "smpds file" {
 }
 
 test "caret formula with regular valuations" {
-    const str = "caret{ ~(True Ug ( ~ p1 ) ) where [ p1 := p2 : gamma1 + gamma2 * + (gamma1 | gamma2)* + .*, p3 := p4: gamma1 + .* ]}";
+    const str = "caret{ ~(True Ug ( ~ p1 ) ) where [ p1 := p2 : /gamma1 + gamma2 * + (gamma1 | gamma2)* + .*/, p3 := p4: /gamma1 + .* /]}";
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

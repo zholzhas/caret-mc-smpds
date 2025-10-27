@@ -438,7 +438,7 @@ pub const LabellingFunction = struct {
 
         try fillAps(&state_aps, formula, state_names, func);
 
-        for (valuations) |val| {
+        val_loop: for (valuations) |val| {
             if (!formula.hasAP(val.ap)) {
                 continue;
             }
@@ -470,7 +470,7 @@ pub const LabellingFunction = struct {
                         for (proc.states.state_map.keys()) |state_str| {
                             if (s.state == null or func(s.state.?, state_str)) {
                                 for (regular_symbols_map.keys()) |symbol| {
-                                    if (regular_symbols_map.get(symbol).?.sym == proc.symbols.symbol_map.get(s.top).?) {
+                                    if (regular_symbols_map.get(symbol).?.sym == (proc.symbols.symbol_map.get(s.top) orelse continue :val_loop)) {
                                         const ap_set = state_aps.getPtr(.{ .state = proc.states.state_map.get(state_str).?, .top = symbol }).?;
                                         try ap_set.*.put(val.ap, {});
                                     }

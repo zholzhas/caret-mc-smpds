@@ -314,8 +314,9 @@ pub const MA = struct {
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
 
-    edges_by_head: std.AutoHashMap(EdgeHead, std.SinglyLinkedList(*const Edge)),
-    edge_set: std.AutoHashMap(Edge, void),
+    edges_by_head: std.AutoHashMap(EdgeHead, std.AutoArrayHashMap(*const Edge, void)),
+    edge_storage: std.AutoHashMap(Edge, *Edge),
+    edge_set: std.AutoHashMap(*const Edge, void),
 
     pub const StateNode = struct {
         state: StateName,
@@ -353,57 +354,64 @@ pub const MA = struct {
         return .{
             .arena = arena,
             .gpa = gpa,
-            .edges_by_head = std.AutoHashMap(EdgeHead, std.SinglyLinkedList(*const Edge)).init(gpa),
-            .edge_set = std.AutoHashMap(Edge, void).init(gpa),
+            .edges_by_head = std.AutoHashMap(EdgeHead, std.AutoArrayHashMap(*const Edge, void)).init(gpa),
+            .edge_set = std.AutoHashMap(*const Edge, void).init(gpa),
+            .edge_storage = std.AutoHashMap(Edge, *Edge).init(gpa),
         };
     }
 
     pub fn deinit(self: *@This()) void {
+        var it = self.edges_by_head.iterator();
+        while (it.next()) |itt| {
+            itt.value_ptr.deinit();
+        }
         self.edges_by_head.deinit();
         self.edge_set.deinit();
+        self.edge_storage.deinit();
     }
 
-    fn storeEdge(self: *@This(), edge: Edge) !*const Edge {
+    pub fn storeEdge(self: *@This(), edge: Edge) !*const Edge {
+        const gop = try self.edge_storage.getOrPut(edge);
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
+        }
         const new_edge = try self.arena.create(Edge);
         new_edge.* = edge;
+        gop.value_ptr.* = new_edge;
         return new_edge;
     }
 
-    pub fn addEdge(self: *@This(), edge: Edge) !bool {
-        if (self.edge_set.contains(edge)) {
+    pub fn addEdgePtr(self: *@This(), new_edge: *const Edge) !bool {
+        if (self.edge_set.contains(new_edge)) {
             return false;
         }
-        try self.edge_set.put(edge, {});
+        try self.edge_set.put(new_edge, {});
+        const edge = new_edge.*;
 
         {
             const head = EdgeHead{ .from = edge.from, .symbol = edge.symbol };
 
-            const new_edge = try self.storeEdge(edge);
-            const new_node = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
-            new_node.* = std.SinglyLinkedList(*const Edge).Node{
-                .data = new_edge,
-            };
             const gop = try self.edges_by_head.getOrPut(head);
             if (!gop.found_existing) {
-                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Edge, void).init(self.gpa);
             }
-            gop.value_ptr.*.prepend(new_node);
+            try gop.value_ptr.put(new_edge, {});
         }
         {
             const head = EdgeHead{ .from = edge.from, .symbol = null };
 
-            const new_edge = try self.storeEdge(edge);
-            const new_node = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
-            new_node.* = std.SinglyLinkedList(*const Edge).Node{
-                .data = new_edge,
-            };
             const gop = try self.edges_by_head.getOrPut(head);
             if (!gop.found_existing) {
-                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Edge, void).init(self.gpa);
             }
-            gop.value_ptr.*.prepend(new_node);
+            try gop.value_ptr.put(new_edge, {});
         }
         return true;
+    }
+
+    pub fn addEdge(self: *@This(), edge: Edge) !bool {
+        const new_edge = try self.storeEdge(edge);
+        return self.addEdgePtr(new_edge);
     }
 
     pub const PathResult = struct {
@@ -425,8 +433,8 @@ pub const MA = struct {
                 .from = from,
                 .symbol = EdgeSymbol{ .symbol = word[0] },
             }) orelse break :exact_symbols;
-            while (edge_list.popFirst()) |edge_node| {
-                try self.hasPathAux(edge_node.data.to, word[1..], accepting or edge_node.data.accepting, res);
+            for (edge_list.keys()) |edge| {
+                try self.hasPathAux(edge.to, word[1..], accepting or edge.accepting, res);
             }
         }
 
@@ -435,8 +443,8 @@ pub const MA = struct {
                 .from = from,
                 .symbol = EdgeSymbol{ .star = {} },
             }) orelse break :star_symbols;
-            while (edge_list.popFirst()) |edge_node| {
-                try self.hasPathAux(edge_node.data.to, word[1..], accepting or edge_node.data.accepting, res);
+            for (edge_list.keys()) |edge| {
+                try self.hasPathAux(edge.to, word[1..], accepting or edge.accepting, res);
             }
         }
     }
@@ -541,8 +549,8 @@ pub const MA = struct {
                             .from = to_node,
                             .symbol = null,
                         }) orelse continue :rule_loop;
-                        while (edges.popFirst()) |edge_node| {
-                            const edge = edge_node.data;
+                        for (edges.keys()) |edge| {
+                            // const edge = edge_node.data;
                             const from_node = Node{ .st = StateNode{
                                 .state = r.from,
                                 .phase = phase_name,

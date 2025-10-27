@@ -33,10 +33,10 @@ pub const HeadReachabilityGraph = struct {
     heads: std.AutoArrayHashMap(Head, *Head),
 
     edges: std.AutoArrayHashMap(Edge, *const Edge),
-    edges_by_src: std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)),
-    edges_by_trg: std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)),
+    edges_by_src: std.AutoHashMap(*const Head, std.AutoArrayHashMap(*const Edge, void)),
+    edges_by_trg: std.AutoHashMap(*const Head, std.AutoArrayHashMap(*const Edge, void)),
 
-    heads_by_state: std.AutoHashMap(HeadState, std.SinglyLinkedList(*const Head)),
+    heads_by_state: std.AutoHashMap(HeadState, std.AutoArrayHashMap(*const Head, void)),
 
     pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, pre_ma: *buchi.MA, sm_bpds: *const buchi.SM_BPDS_Processor) @This() {
         return @This(){
@@ -47,19 +47,40 @@ pub const HeadReachabilityGraph = struct {
             .sm_bpds = sm_bpds,
 
             .edges = std.AutoArrayHashMap(Edge, *const Edge).init(gpa),
-            .edges_by_src = std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)).init(gpa),
-            .edges_by_trg = std.AutoHashMap(*const Head, std.SinglyLinkedList(*const Edge)).init(gpa),
+            .edges_by_src = std.AutoHashMap(*const Head, std.AutoArrayHashMap(*const Edge, void)).init(gpa),
+            .edges_by_trg = std.AutoHashMap(*const Head, std.AutoArrayHashMap(*const Edge, void)).init(gpa),
 
-            .heads_by_state = std.AutoHashMap(HeadState, std.SinglyLinkedList(*const Head)).init(gpa),
+            .heads_by_state = std.AutoHashMap(HeadState, std.AutoArrayHashMap(*const Head, void)).init(gpa),
             .heads = std.AutoArrayHashMap(Head, *Head).init(gpa),
         };
     }
 
     pub fn deinit(self: *@This()) void {
         self.edges.deinit();
-        self.edges_by_src.deinit();
-        self.edges_by_trg.deinit();
-        self.heads_by_state.deinit();
+        {
+            var it = self.edges_by_src.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+
+            self.edges_by_src.deinit();
+        }
+        {
+            var it = self.edges_by_trg.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+
+            self.edges_by_trg.deinit();
+        }
+        {
+            var it = self.heads_by_state.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+
+            self.heads_by_state.deinit();
+        }
         self.heads.deinit();
     }
 
@@ -85,69 +106,56 @@ pub const HeadReachabilityGraph = struct {
         if (self.edges.contains(edge)) {
             return false;
         }
-
-        const src = edge.from;
         const edge_ptr = try self.arena.create(Edge);
         edge_ptr.* = edge;
 
         try self.edges.put(edge, edge_ptr);
 
         {
-            const gop = try self.edges_by_src.getOrPut(src);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
-            }
-            const node_ptr = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
-            node_ptr.* = std.SinglyLinkedList(*const Edge).Node{
-                .data = edge_ptr,
-            };
-            gop.value_ptr.prepend(node_ptr);
-        }
-
-        {
             const gop = try self.edges_by_trg.getOrPut(edge.to);
             if (!gop.found_existing) {
-                gop.value_ptr.* = std.SinglyLinkedList(*const Edge){};
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Edge, void).init(self.gpa);
             }
-            const node_ptr = try self.arena.create(std.SinglyLinkedList(*const Edge).Node);
-            node_ptr.* = std.SinglyLinkedList(*const Edge).Node{
-                .data = edge_ptr,
-            };
-            gop.value_ptr.prepend(node_ptr);
+            try gop.value_ptr.put(edge_ptr, {});
         }
 
         {
             const gop = try self.heads_by_state.getOrPut(HeadState{ .state = edge.from.state, .phase = edge.from.phase });
             if (!gop.found_existing) {
-                gop.value_ptr.* = std.SinglyLinkedList(*const Head){};
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Head, void).init(self.gpa);
             }
-            const node_ptr = try self.arena.create(std.SinglyLinkedList(*const Head).Node);
-            node_ptr.* = std.SinglyLinkedList(*const Head).Node{
-                .data = edge.from,
-            };
-            gop.value_ptr.prepend(node_ptr);
+            try gop.value_ptr.put(edge.from, {});
         }
 
         {
             const gop = try self.heads_by_state.getOrPut(HeadState{ .state = edge.to.state, .phase = edge.to.phase });
             if (!gop.found_existing) {
-                gop.value_ptr.* = std.SinglyLinkedList(*const Head){};
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Head, void).init(self.gpa);
             }
-            const node_ptr = try self.arena.create(std.SinglyLinkedList(*const Head).Node);
-            node_ptr.* = std.SinglyLinkedList(*const Head).Node{
-                .data = edge.to,
-            };
-            gop.value_ptr.prepend(node_ptr);
+            try gop.value_ptr.put(edge.to, {});
         }
 
         return true;
     }
 
     pub fn constructSchwoon(self: *@This()) !void {
+        defer {
+            var it = self.edges_by_trg.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+            self.edges_by_trg.clearAndFree();
+        }
         //  rel = self.pre_ma
 
-        var trans = std.ArrayList(buchi.MA.Edge).init(self.gpa);
-        defer trans.deinit();
+        var trans = std.SinglyLinkedList(*const buchi.MA.Edge){};
+        defer {
+            while (trans.popFirst()) |n| {
+                self.gpa.destroy(n);
+            }
+        }
+        var trans_set = std.AutoHashMap(*const buchi.MA.Edge, void).init(self.gpa);
+        defer trans_set.deinit();
 
         // delta_aux = self.edges
 
@@ -208,7 +216,7 @@ pub const HeadReachabilityGraph = struct {
                             continue :rule_loop;
                         }
                         if (r.new_top == null) {
-                            try trans.append(buchi.MA.Edge{
+                            const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
                                 .from = buchi.MA.Node{
                                     .st = buchi.MA.StateNode{
                                         .state = r.from,
@@ -226,6 +234,12 @@ pub const HeadReachabilityGraph = struct {
                                 },
                                 .accepting = self.sm_bpds.isAccepting(r.from.*),
                             });
+                            if (!trans_set.contains(edge_ptr)) {
+                                const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                new_node.* = .{ .data = edge_ptr };
+                                trans.prepend(new_node);
+                                try trans_set.put(edge_ptr, {});
+                            }
                         }
                     },
                 }
@@ -236,14 +250,13 @@ pub const HeadReachabilityGraph = struct {
             std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
-        while (trans.pop()) |edge| {
-            if (trans.capacity > trans.items.len * 3) {
-                trans.shrinkAndFree(trans.items.len);
-            }
-            if (self.pre_ma.edge_set.contains(edge)) {
+        while (trans.popFirst()) |edge_node| {
+            const edge = edge_node.data;
+            self.gpa.destroy(edge_node);
+
+            if (!try self.pre_ma.addEdgePtr(edge)) {
                 continue;
             }
-            _ = try self.pre_ma.addEdge(edge);
 
             const hr_edges_opt = self.edges_by_trg.get(try self.addHead(Head{
                 .state = edge.from.st.state,
@@ -251,21 +264,26 @@ pub const HeadReachabilityGraph = struct {
                 .top = edge.symbol.symbol,
             }));
             if (hr_edges_opt) |hr_edges| {
-                var cur_hr_edge = hr_edges.first;
-                while (cur_hr_edge) |hr_edge| : (cur_hr_edge = hr_edge.next) {
-                    try trans.append(buchi.MA.Edge{
+                for (hr_edges.keys()) |hr_edge| {
+                    const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
                         .from = buchi.MA.Node{
                             .st = buchi.MA.StateNode{
-                                .state = hr_edge.data.from.state,
-                                .phase = hr_edge.data.from.phase,
+                                .state = hr_edge.from.state,
+                                .phase = hr_edge.from.phase,
                             },
                         },
                         .symbol = buchi.MA.EdgeSymbol{
-                            .symbol = hr_edge.data.from.top,
+                            .symbol = hr_edge.from.top,
                         },
                         .to = edge.to,
-                        .accepting = edge.accepting or hr_edge.data.label,
+                        .accepting = edge.accepting or hr_edge.label,
                     });
+                    if (!trans_set.contains(edge_ptr)) {
+                        const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                        new_node.* = .{ .data = edge_ptr };
+                        trans.prepend(new_node);
+                        try trans_set.put(edge_ptr, {});
+                    }
                 }
             }
 
@@ -291,7 +309,7 @@ pub const HeadReachabilityGraph = struct {
                             // unreachable;
                         };
                         if (candidate_phase == edge.from.st.phase) {
-                            try trans.append(buchi.MA.Edge{
+                            const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
                                 .from = buchi.MA.Node{
                                     .st = buchi.MA.StateNode{
                                         .state = r.sm.from,
@@ -302,6 +320,12 @@ pub const HeadReachabilityGraph = struct {
                                 .to = edge.to,
                                 .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
                             });
+                            if (!trans_set.contains(edge_ptr)) {
+                                const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                new_node.* = .{ .data = edge_ptr };
+                                trans.prepend(new_node);
+                                try trans_set.put(edge_ptr, {});
+                            }
                         }
                     }
                 }
@@ -316,7 +340,7 @@ pub const HeadReachabilityGraph = struct {
                         continue;
                     }
                     if (r.standard.new_tail == null) {
-                        try trans.append(buchi.MA.Edge{
+                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
                             .from = buchi.MA.Node{
                                 .st = buchi.MA.StateNode{
                                     .state = r.standard.from,
@@ -329,6 +353,12 @@ pub const HeadReachabilityGraph = struct {
                             .to = edge.to,
                             .accepting = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
                         });
+                        if (!trans_set.contains(edge_ptr)) {
+                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                            new_node.* = .{ .data = edge_ptr };
+                            trans.prepend(new_node);
+                            try trans_set.put(edge_ptr, {});
+                        }
                     } else {
                         _ = try self.addEdge(Edge{
                             .from = try self.addHead(Head{
@@ -349,9 +379,8 @@ pub const HeadReachabilityGraph = struct {
                             .symbol = buchi.MA.EdgeSymbol{ .symbol = r.standard.new_tail.? },
                         });
                         if (aux_edges_opt) |aux_edges| {
-                            var edge_it = aux_edges.first;
-                            while (edge_it) |edge_aux| : (edge_it = edge_aux.next) {
-                                try trans.append(buchi.MA.Edge{
+                            for (aux_edges.keys()) |edge_aux| {
+                                const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
                                     .from = buchi.MA.Node{
                                         .st = buchi.MA.StateNode{
                                             .state = r.standard.from,
@@ -361,9 +390,15 @@ pub const HeadReachabilityGraph = struct {
                                     .symbol = buchi.MA.EdgeSymbol{
                                         .symbol = r.standard.top,
                                     },
-                                    .to = edge_aux.data.to,
-                                    .accepting = edge.accepting or edge_aux.data.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                    .to = edge_aux.to,
+                                    .accepting = edge.accepting or edge_aux.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
                                 });
+                                if (!trans_set.contains(edge_ptr)) {
+                                    const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                    new_node.* = .{ .data = edge_ptr };
+                                    trans.prepend(new_node);
+                                    try trans_set.put(edge_ptr, {});
+                                }
                             }
                         }
                     }
@@ -405,6 +440,9 @@ pub const HeadReachabilityGraph = struct {
                 }
             }
         }
+        if (root.state_initialized) {
+            std.log.info("SM edges start: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
 
         for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
             const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
@@ -423,31 +461,31 @@ pub const HeadReachabilityGraph = struct {
 
                         from_heads: {
                             const head_list = (self.heads_by_state.get(HeadState{ .state = r.from, .phase = phase_name }) orelse break :from_heads);
-                            var head_it = head_list.first;
-                            while (head_it) |head_node| : (head_it = head_node.next) {
+
+                            for (head_list.keys()) |head| {
                                 _ = try self.addEdge(Edge{
-                                    .from = head_node.data,
+                                    .from = head,
                                     .label = self.sm_bpds.isAccepting(r.from.*),
                                     .to = try self.addHead(Head{
                                         .state = r.to,
                                         .phase = next_phase,
-                                        .top = head_node.data.top,
+                                        .top = head.top,
                                     }),
                                 });
                             }
                         }
                         to_heads: {
                             const head_list = (self.heads_by_state.get(HeadState{ .state = r.to, .phase = next_phase }) orelse break :to_heads);
-                            var head_it = head_list.first;
-                            while (head_it) |head_node| : (head_it = head_node.next) {
+
+                            for (head_list.keys()) |head| {
                                 _ = try self.addEdge(Edge{
                                     .from = try self.addHead(Head{
                                         .state = r.from,
                                         .phase = phase_name,
-                                        .top = head_node.data.top,
+                                        .top = head.top,
                                     }),
                                     .label = self.sm_bpds.isAccepting(r.from.*),
-                                    .to = head_node.data,
+                                    .to = head,
                                 });
                             }
                         }
@@ -567,7 +605,7 @@ pub const HeadReachabilityGraph = struct {
     };
 
     // Tarjan algo
-    pub fn findRepeatingHeads(self: *const @This(), gpa: std.mem.Allocator) ![]SCC {
+    pub fn findRepeatingHeads(self: *@This(), gpa: std.mem.Allocator) ![]SCC {
         var index: u32 = 0;
 
         var stack = std.ArrayList(*Head).init(gpa);
@@ -575,6 +613,16 @@ pub const HeadReachabilityGraph = struct {
 
         var sccs = std.ArrayList(SCC).init(gpa);
         defer sccs.deinit();
+
+        for (self.edges.values()) |edge| {
+            const src = edge.from;
+
+            const gop = try self.edges_by_src.getOrPut(src);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Edge, void).init(self.gpa);
+            }
+            try gop.value_ptr.put(edge, {});
+        }
 
         for (self.heads.values()) |head| {
             if (head.index == null) {
@@ -596,9 +644,8 @@ pub const HeadReachabilityGraph = struct {
 
         const edges = self.edges_by_src.get(head);
         if (edges) |edge_list| {
-            var edge_it = edge_list.first;
-            while (edge_it) |edge_node| : (edge_it = edge_node.next) {
-                const to = edge_node.data.to;
+            for (edge_list.keys()) |edge| {
+                const to = edge.to;
                 if (to.*.index == null) {
                     try self.strongconnect(gpa, @constCast(to), stack, index, sccs);
                     head.*.lowlink = @min(head.lowlink.?, to.lowlink.?);

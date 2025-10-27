@@ -2,9 +2,9 @@
 init p1 g1 # r1 r2 r3;
 
 caret{ True Ug ~(~ a1 || ~( True Ug a2)) where [
-    a1 := p2 : g2 + .*,
-    a1 := p3 : g2 + .*,
-    a2 := * : g2 + g1 + .*
+    a1 := p2 : /g2 + .*/,
+    a1 := p3 : /g2 + .*/,
+    a2 := * : /g2 + g1 + .*/
 ]}
 
 r1: p1 g1 -> p2 g2 g1;

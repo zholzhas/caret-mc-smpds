@@ -1112,12 +1112,15 @@ pub const SM_GBPDS_Processor = struct {
         }
 
         while (stack.pop()) |cur| {
+            if (stack.capacity > stack.items.len * 3) {
+                stack.shrinkAndFree(stack.items.len);
+            }
             if (visited_states.contains(cur)) {
                 continue;
             }
-            try visited_states.put(cur, {});
+            try visited_states.putNoClobber(cur, {});
             const st = cur.*;
-            const rules = rules_by_src.get(st.control_point) orelse std.ArrayList(usize).init(self.gpa);
+            const rules = rules_by_src.get(st.control_point) orelse continue;
             for (rules.items) |lr_num| {
                 const lr = sm_pds.rules.items[lr_num];
                 const r_name = lr.label;
@@ -1218,10 +1221,10 @@ pub const SM_GBPDS_Processor = struct {
             switch (lr.rule) {
                 .call => |r| {
                     var edge_it = pre_ma.edges_by_head.get(.{ .from = r.to, .symbol = r.new_top }) orelse continue;
-                    while (edge_it.popFirst()) |edge_node| {
+                    ret_loc_loop: while (edge_it.popFirst()) |edge_node| {
                         const to_state = edge_node.data.to;
-                        for ((ret_rules.get(to_state) orelse continue).keys()) |ret_rule| {
-                            for (pushed_ret_symbols.get(r.new_tail).?.keys()) |sym| {
+                        for ((ret_rules.get(to_state) orelse continue :ret_loc_loop).keys()) |ret_rule| {
+                            for ((pushed_ret_symbols.get(r.new_tail) orelse continue :ret_loc_loop).keys()) |sym| {
                                 const new_r_decode_opt = try self.constructRetRuleDecode(
                                     ret_rule.to,
                                     ret_rule.label,
