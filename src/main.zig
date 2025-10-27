@@ -131,8 +131,8 @@ pub fn main() !void {
     }
 }
 
-pub fn print_errors(_: anyerror) void {
-    std.log.err("OOM", .{});
+pub fn print_errors(e: anyerror) void {
+    std.log.err("{}", .{e});
 
     const f_time: f64 = @floatFromInt(state.timer.read());
     const f_mem: f64 = @floatFromInt(state.arena.queryCapacity());
@@ -179,6 +179,10 @@ pub fn caret_model_check(
         gpa.free(closure);
     }
 
+    if (state_initialized) {
+        std.log.info("Got closure ({}): {d:.3}s", .{ closure.len, @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
+    }
+
     // std.debug.print("Closure: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
     const atoms = try gbuchi.Atom.getAtoms(gpa, closure);
@@ -189,7 +193,7 @@ pub fn caret_model_check(
         gpa.free(atoms);
     }
     if (state_initialized) {
-        std.log.info("Got closure ({}) and atoms ({}): {d:.3}s", .{ closure.len, atoms.len, @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
+        std.log.info("Got atoms ({}): {d:.3}s", .{ atoms.len, @as(f64, @floatFromInt(state.timer.read())) / 1000000000 });
     }
     // std.debug.print("Atoms: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
 
