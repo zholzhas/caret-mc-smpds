@@ -161,7 +161,7 @@ pub const HeadReachabilityGraph = struct {
 
         const RuleTail = struct {
             to: buchi.StateName,
-            new_top: ?buchi.SymbolName, // null for self-modifying rules
+            new_top: buchi.SymbolName, // null for self-modifying rules
         };
 
         var rules_by_tail = std.AutoHashMap(RuleTail, std.ArrayList(*const buchi.Rule)).init(self.gpa);
@@ -178,7 +178,7 @@ pub const HeadReachabilityGraph = struct {
                 .sm => |r| {
                     const tail = RuleTail{
                         .to = r.to,
-                        .new_top = null,
+                        .new_top = r.top,
                     };
                     const gop = try rules_by_tail.getOrPut(tail);
                     if (!gop.found_existing) {
@@ -310,89 +310,45 @@ pub const HeadReachabilityGraph = struct {
                 }
             }
 
-            // sm rules
-            if (rules_by_tail.get(.{ .to = edge.from.st.state, .new_top = null })) |tail_rules| {
-                for (tail_rules.items) |r| {
-                    const prevs = prev_phases.get(.{
-                        .res_phase = edge.from.st.phase,
-                        .new_sm = r.sm.new_rules,
-                        .old_sm = r.sm.old_rules,
-                    }) orelse continue;
-                    for (prevs.items) |prev_phase| {
-                        const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(prev_phase).?;
-                        if (!phase.items.contains(r.sm.label)) {
-                            continue;
-                        }
-                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
-                            .from = buchi.MA.Node{
-                                .st = buchi.MA.StateNode{
-                                    .state = r.sm.from,
-                                    .phase = prev_phase,
-                                },
-                            },
-                            .symbol = edge.symbol,
-                            .to = edge.to,
-                            .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
-                        });
-                        if (!trans_set.contains(edge_ptr)) {
-                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
-                            new_node.* = .{ .data = edge_ptr };
-                            trans.prepend(new_node);
-                            try trans_set.put(edge_ptr, {});
-                        }
-                    }
-                }
-            }
-
-            // standard rules
             if (rules_by_tail.get(.{ .to = edge.from.st.state, .new_top = edge.symbol.symbol })) |tail_rules| {
-                const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(edge.from.st.phase).?;
-
                 for (tail_rules.items) |r| {
-                    if (!phase.items.contains(r.standard.label)) {
-                        continue;
-                    }
-                    if (r.standard.new_tail == null) {
-                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
-                            .from = buchi.MA.Node{
-                                .st = buchi.MA.StateNode{
-                                    .state = r.standard.from,
-                                    .phase = edge.from.st.phase,
-                                },
-                            },
-                            .symbol = buchi.MA.EdgeSymbol{
-                                .symbol = r.standard.top,
-                            },
-                            .to = edge.to,
-                            .accepting = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
-                        });
-                        if (!trans_set.contains(edge_ptr)) {
-                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
-                            new_node.* = .{ .data = edge_ptr };
-                            trans.prepend(new_node);
-                            try trans_set.put(edge_ptr, {});
-                        }
-                    } else {
-                        _ = try self.addEdge(Edge{
-                            .from = try self.addHead(Head{
-                                .state = r.standard.from,
-                                .phase = edge.from.st.phase,
-                                .top = r.standard.top,
-                            }),
-                            .to = try self.addHead(Head{
-                                .state = edge.to.st.state,
-                                .phase = edge.to.st.phase,
-                                .top = r.standard.new_tail.?,
-                            }),
-                            .label = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
-                        });
-
-                        const aux_edges_opt = self.pre_ma.edges_by_head.get(.{
-                            .from = edge.to,
-                            .symbol = buchi.MA.EdgeSymbol{ .symbol = r.standard.new_tail.? },
-                        });
-                        if (aux_edges_opt) |aux_edges| {
-                            for (aux_edges.keys()) |edge_aux| {
+                    switch (r.*) {
+                        .sm => {
+                            const prevs = prev_phases.get(.{
+                                .res_phase = edge.from.st.phase,
+                                .new_sm = r.sm.new_rules,
+                                .old_sm = r.sm.old_rules,
+                            }) orelse continue;
+                            for (prevs.items) |prev_phase| {
+                                const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(prev_phase).?;
+                                if (!phase.items.contains(r.sm.label)) {
+                                    continue;
+                                }
+                                const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                                    .from = buchi.MA.Node{
+                                        .st = buchi.MA.StateNode{
+                                            .state = r.sm.from,
+                                            .phase = prev_phase,
+                                        },
+                                    },
+                                    .symbol = edge.symbol,
+                                    .to = edge.to,
+                                    .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
+                                });
+                                if (!trans_set.contains(edge_ptr)) {
+                                    const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                    new_node.* = .{ .data = edge_ptr };
+                                    trans.prepend(new_node);
+                                    try trans_set.put(edge_ptr, {});
+                                }
+                            }
+                        },
+                        .standard => {
+                            const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(edge.from.st.phase).?;
+                            if (!phase.items.contains(r.standard.label)) {
+                                continue;
+                            }
+                            if (r.standard.new_tail == null) {
                                 const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
                                     .from = buchi.MA.Node{
                                         .st = buchi.MA.StateNode{
@@ -403,8 +359,8 @@ pub const HeadReachabilityGraph = struct {
                                     .symbol = buchi.MA.EdgeSymbol{
                                         .symbol = r.standard.top,
                                     },
-                                    .to = edge_aux.to,
-                                    .accepting = edge.accepting or edge_aux.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                    .to = edge.to,
+                                    .accepting = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
                                 });
                                 if (!trans_set.contains(edge_ptr)) {
                                     const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
@@ -412,8 +368,50 @@ pub const HeadReachabilityGraph = struct {
                                     trans.prepend(new_node);
                                     try trans_set.put(edge_ptr, {});
                                 }
+                            } else {
+                                _ = try self.addEdge(Edge{
+                                    .from = try self.addHead(Head{
+                                        .state = r.standard.from,
+                                        .phase = edge.from.st.phase,
+                                        .top = r.standard.top,
+                                    }),
+                                    .to = try self.addHead(Head{
+                                        .state = edge.to.st.state,
+                                        .phase = edge.to.st.phase,
+                                        .top = r.standard.new_tail.?,
+                                    }),
+                                    .label = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                });
+
+                                const aux_edges_opt = self.pre_ma.edges_by_head.get(.{
+                                    .from = edge.to,
+                                    .symbol = buchi.MA.EdgeSymbol{ .symbol = r.standard.new_tail.? },
+                                });
+                                if (aux_edges_opt) |aux_edges| {
+                                    for (aux_edges.keys()) |edge_aux| {
+                                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                                            .from = buchi.MA.Node{
+                                                .st = buchi.MA.StateNode{
+                                                    .state = r.standard.from,
+                                                    .phase = edge.from.st.phase,
+                                                },
+                                            },
+                                            .symbol = buchi.MA.EdgeSymbol{
+                                                .symbol = r.standard.top,
+                                            },
+                                            .to = edge_aux.to,
+                                            .accepting = edge.accepting or edge_aux.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                        });
+                                        if (!trans_set.contains(edge_ptr)) {
+                                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                            new_node.* = .{ .data = edge_ptr };
+                                            trans.prepend(new_node);
+                                            try trans_set.put(edge_ptr, {});
+                                        }
+                                    }
+                                }
                             }
-                        }
+                        },
                     }
                 }
             }
@@ -425,12 +423,35 @@ pub const HeadReachabilityGraph = struct {
             std.log.info("Adding default hr edges ({} edges currently): {d:.3}s", .{ self.edges.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
             std.log.info("Iterating over {} phases and {} rules ({} total)", .{ self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.count(), self.sm_bpds.rules.count(), self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.count() * self.sm_bpds.rules.count() });
         }
+
         for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
             const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
 
             rule_loop: for (self.sm_bpds.rules.keys()) |rule| {
                 switch (rule) {
-                    .sm => {},
+                    .sm => |r| {
+                        if (!phase.items.contains(r.label)) {
+                            continue :rule_loop;
+                        }
+                        const next_phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.get(.{
+                            .original_phase = phase_name,
+                            .to_add = r.new_rules,
+                            .to_remove = r.old_rules,
+                        }) orelse continue :rule_loop; // continue because it means for rule p -(r1 / r2)-> p1 there is no r1 in phase.
+                        _ = try self.addEdge(Edge{
+                            .from = try self.addHead(Head{
+                                .state = r.from,
+                                .phase = phase_name,
+                                .top = r.top,
+                            }),
+                            .label = self.sm_bpds.isAccepting(r.from.*),
+                            .to = try self.addHead(Head{
+                                .state = r.to,
+                                .phase = next_phase,
+                                .top = r.top,
+                            }),
+                        });
+                    },
                     .standard => |r| {
                         if (!phase.items.contains(r.label)) {
                             continue :rule_loop;
@@ -455,57 +476,7 @@ pub const HeadReachabilityGraph = struct {
             }
         }
         if (root.state_initialized) {
-            std.log.info("SM edges start ({} edges currently): {d:.3}s", .{ self.edges.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
-        }
-
-        for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
-            const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
-            rule_loop: for (self.sm_bpds.rules.keys()) |rule| {
-                switch (rule) {
-                    .standard => {},
-                    .sm => |r| {
-                        if (!phase.items.contains(r.label)) {
-                            continue :rule_loop;
-                        }
-                        const next_phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.get(.{
-                            .original_phase = phase_name,
-                            .to_add = r.new_rules,
-                            .to_remove = r.old_rules,
-                        }) orelse continue :rule_loop; // continue because it means for rule p -(r1 / r2)-> p1 there is no r1 in phase.
-
-                        from_heads: {
-                            const head_list = (self.heads_by_state.get(HeadState{ .state = r.from, .phase = phase_name }) orelse break :from_heads);
-
-                            for (head_list.keys()) |head| {
-                                _ = try self.addEdge(Edge{
-                                    .from = head,
-                                    .label = self.sm_bpds.isAccepting(r.from.*),
-                                    .to = try self.addHead(Head{
-                                        .state = r.to,
-                                        .phase = next_phase,
-                                        .top = head.top,
-                                    }),
-                                });
-                            }
-                        }
-                        to_heads: {
-                            const head_list = (self.heads_by_state.get(HeadState{ .state = r.to, .phase = next_phase }) orelse break :to_heads);
-
-                            for (head_list.keys()) |head| {
-                                _ = try self.addEdge(Edge{
-                                    .from = try self.addHead(Head{
-                                        .state = r.from,
-                                        .phase = phase_name,
-                                        .top = head.top,
-                                    }),
-                                    .label = self.sm_bpds.isAccepting(r.from.*),
-                                    .to = head,
-                                });
-                            }
-                        }
-                    },
-                }
-            }
+            std.log.info("Edges finish ({} edges and {} heads currently): {d:.3}s", .{ self.edges.count(), self.heads.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
         }
     }
 

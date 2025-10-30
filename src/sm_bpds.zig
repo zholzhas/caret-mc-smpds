@@ -26,6 +26,7 @@ pub const SMRule = packed struct {
     to: StateName,
     old_rules: PhaseName,
     new_rules: PhaseName,
+    top: SymbolName,
 };
 
 pub const Rule = union(enum) {
@@ -146,6 +147,7 @@ pub const SM_BPDS_Processor = struct {
                             .label = r.label,
                             .old_rules = r.old_rules,
                             .new_rules = r.new_rules,
+                            .top = r.top,
                         };
                         try self.storeRule(Rule{ .sm = new_rule });
                     }
