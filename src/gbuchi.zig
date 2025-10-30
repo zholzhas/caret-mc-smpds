@@ -1243,6 +1243,364 @@ pub const SM_GBPDS_Processor = struct {
         }
     }
 
+    pub fn constructCallRuleWithCheck(
+        self: *@This(),
+        r: processor.CallRule,
+        r_name: processor.RuleName,
+        a_left: AtomName,
+        a_right: AtomName,
+        l_left: ExitLabel,
+        l_right: ExitLabel,
+        lambda: processor.LabellingFunction,
+    ) !?StandardRule {
+        if (!a_left.isTransition(.call)) return null;
+
+        const s_left = r.from;
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
+        if (!a_left.containsAPsExactly(aps_left)) return null;
+
+        const s_right = r.to;
+        const aps_right = lambda.getAPs(.{ .state = s_right, .top = r.new_top });
+        if (!a_right.containsAPsExactly(aps_right)) return null;
+
+        if (l_right == .unexit and (l_left != .unexit or !a_left.absFormsEmpty())) return null;
+
+        if (!a_left.glNext(a_right.*)) return null;
+        if (!a_right.calNext(a_left.*)) return null;
+
+        const new_from = try self.getStateName(State{
+            .control_point = s_left,
+            .atom = a_left,
+            .label = l_left,
+        });
+
+        const new_to = try self.getStateName(State{
+            .control_point = s_right,
+            .atom = a_right,
+            .label = l_right,
+        });
+
+        const new_new_tail = try self.getSymbolName(Symbol{ .ret = RetSymbol{
+            .symbol = r.new_tail,
+            .atom = a_left,
+            .label = l_left,
+        } });
+
+        return StandardRule{
+            .label = r_name,
+            .from = new_from,
+            .to = new_to,
+            .top = try self.getSymbolName(Symbol{ .standard = r.top }),
+            .new_top = try self.getSymbolName(Symbol{ .standard = r.new_top }),
+            .new_tail = new_new_tail,
+        };
+    }
+
+    pub fn constructRetRulePopWithCheck(
+        self: *@This(),
+        r: processor.RetRule,
+        r_name: processor.RuleName,
+        a_left: AtomName,
+        a_right: AtomName,
+        l_right: ExitLabel,
+        lambda: processor.LabellingFunction,
+    ) !?StandardRule {
+        if (!a_left.isTransition(.ret)) return null;
+
+        if (!a_left.glNext(a_right.*)) return null;
+
+        const s_left = r.from;
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
+        if (!a_left.containsAPsExactly(aps_left)) return null;
+
+        if (!a_left.absFormsEmpty()) return null;
+
+        const s_right = r.to;
+
+        const new_from = try self.getStateName(State{
+            .control_point = s_left,
+            .atom = a_left,
+            .label = .exit,
+        });
+
+        const new_to = try self.getStateName(State{
+            .control_point = s_right,
+            .atom = a_right,
+            .label = l_right,
+        });
+
+        return StandardRule{
+            .label = r_name,
+            .from = new_from,
+            .to = new_to,
+            .top = try self.getSymbolName(Symbol{ .standard = r.top }),
+            .new_top = null,
+            .new_tail = null,
+        };
+    }
+
+    pub fn constructIntRuleWithCheck(
+        self: *@This(),
+        r: processor.InternalRule,
+        r_name: processor.RuleName,
+        a_left: AtomName,
+        a_right: AtomName,
+        l_left: ExitLabel,
+        lambda: processor.LabellingFunction,
+    ) !?StandardRule {
+        if (!a_left.isTransition(.int)) return null;
+
+        const s_left = r.from;
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
+        if (!a_left.containsAPsExactly(aps_left)) return null;
+
+        const s_right = r.to;
+        if (r.new_top) |nt| {
+            const aps_right = lambda.getAPs(.{ .state = s_right, .top = nt });
+            if (!a_right.containsAPsExactly(aps_right)) return null;
+        }
+
+        if (!a_left.glNext(a_right.*)) return null;
+        if (!a_left.absNext(a_right.*)) return null;
+        if (!a_left.calFormsEqual(a_right.*)) return null;
+
+        const new_from = try self.getStateName(State{
+            .control_point = s_left,
+            .atom = a_left,
+            .label = l_left,
+        });
+
+        const new_to = try self.getStateName(State{
+            .control_point = s_right,
+            .atom = a_right,
+            .label = l_left,
+        });
+
+        return StandardRule{
+            .label = r_name,
+            .from = new_from,
+            .to = new_to,
+            .top = try self.getSymbolName(Symbol{ .standard = r.top }),
+            .new_top = if (r.new_top) |t| try self.getSymbolName(Symbol{ .standard = t }) else null,
+            .new_tail = if (r.new_tail) |t| try self.getSymbolName(Symbol{ .standard = t }) else null,
+        };
+    }
+
+    pub fn constructSMRuleGammaWithCheck(
+        self: *@This(),
+        r: processor.SMRule,
+        gamma: processor.Symbol,
+        r_name: processor.RuleName,
+        a_left: AtomName,
+        a_right: AtomName,
+        l_left: ExitLabel,
+        lambda: processor.LabellingFunction,
+    ) !?StandardRule {
+        if (!a_left.isTransition(.int)) return null;
+
+        const s_left = r.from;
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = gamma });
+        if (!a_left.containsAPsExactly(aps_left)) return null;
+
+        if (!a_left.glNext(a_right.*)) return null;
+        if (!a_left.absNext(a_right.*)) return null;
+        if (!a_left.calFormsEqual(a_right.*)) return null;
+
+        const s_right = r.to;
+
+        const new_from = try self.getStateName(State{
+            .control_point = s_left,
+            .atom = a_left,
+            .label = l_left,
+        });
+
+        const new_to = try self.getStateName(State{
+            .control_point = s_right,
+            .atom = a_right,
+            .label = l_left,
+            .sm_aux = r_name,
+        });
+
+        return StandardRule{
+            .label = r_name,
+            .from = new_from,
+            .to = new_to,
+            .top = try self.getSymbolName(Symbol{ .standard = gamma }),
+            .new_top = try self.getSymbolName(Symbol{ .standard = gamma }),
+            .new_tail = null,
+        };
+    }
+
+    pub fn constructRetRuleDecodeWithCheck(
+        self: *@This(),
+        r: processor.RetRule,
+        r_name: processor.RuleName,
+        gamma: processor.Symbol,
+        a_left: AtomName,
+        a_ret: AtomName,
+        l_left: ExitLabel,
+        l_ret: ExitLabel,
+        lambda: processor.LabellingFunction,
+    ) !?StandardRule {
+        if (!a_ret.isTransition(.call)) return null;
+
+        const s_left = r.to;
+        const aps_left = lambda.getAPs(.{ .state = s_left, .top = r.top });
+        if (!a_left.containsAPsExactly(aps_left)) return null;
+
+        if (!a_ret.absNext(a_left.*)) return null;
+        if (!a_ret.calFormsEqual(a_left.*)) return null;
+        if (l_left != l_ret) return null;
+
+        const new_from = try self.getStateName(State{
+            .control_point = s_left,
+            .atom = a_left,
+            .label = l_left,
+        });
+
+        const new_to = try self.getStateName(State{
+            .control_point = s_left,
+            .atom = a_left,
+            .label = l_ret,
+        });
+
+        const top = try self.getSymbolName(Symbol{ .ret = RetSymbol{
+            .symbol = gamma,
+            .atom = a_ret,
+            .label = l_ret,
+        } });
+
+        return StandardRule{
+            .label = r_name,
+            .from = new_from,
+            .to = new_to,
+            .top = top,
+            .new_top = try self.getSymbolName(Symbol{ .standard = gamma }),
+            .new_tail = null,
+        };
+    }
+
+    pub fn construct(
+        self: *@This(),
+        sm_pds_proc: *const processor.SM_PDS_Processor,
+        atoms: []const Atom,
+        lambda: processor.LabellingFunction,
+    ) !void {
+        const sm_pds = sm_pds_proc.system.?;
+        const label_arr: []const ExitLabel = &.{ ExitLabel.exit, ExitLabel.unexit };
+
+        self.sm_pds_proc = sm_pds_proc;
+
+        self.accept_atoms = try self.constructAcceptAtoms(atoms);
+
+        for (sm_pds.rules.items) |labelled_r| {
+            const r_name = labelled_r.label;
+            const rule = labelled_r.rule;
+            switch (rule) {
+                .call => |r| {
+                    for (atoms) |*a_left| {
+                        for (atoms) |*a_right| {
+                            for (label_arr) |l_left| {
+                                for (label_arr) |l_right| {
+                                    const new_r_opt = try self.constructCallRuleWithCheck(
+                                        r,
+                                        r_name,
+                                        a_left,
+                                        a_right,
+                                        l_left,
+                                        l_right,
+                                        lambda,
+                                    );
+                                    if (new_r_opt) |new_r| {
+                                        try self.storeRule(Rule{ .standard = new_r });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                .ret => |r| {
+                    for (atoms) |*a_left| {
+                        for (atoms) |*a_right| {
+                            for (label_arr) |l_right| {
+                                const new_r_opt = try self.constructRetRulePopWithCheck(
+                                    r,
+                                    r_name,
+                                    a_left,
+                                    a_right,
+                                    l_right,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                }
+
+                                for (sm_pds.alphabet) |gamma| {
+                                    const new_r_decode_opt = try self.constructRetRuleDecodeWithCheck(
+                                        r,
+                                        r_name,
+                                        gamma,
+                                        a_left,
+                                        a_right,
+                                        l_right,
+                                        l_right,
+                                        lambda,
+                                    );
+                                    if (new_r_decode_opt) |new_r| {
+                                        try self.storeRule(Rule{ .standard = new_r });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                .int => |r| {
+                    for (atoms) |*a_left| {
+                        for (atoms) |*a_right| {
+                            for (label_arr) |l_left| {
+                                const new_r_opt = try self.constructIntRuleWithCheck(
+                                    r,
+                                    r_name,
+                                    a_left,
+                                    a_right,
+                                    l_left,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                }
+                            }
+                        }
+                    }
+                },
+                .sm => |r| {
+                    for (atoms) |*a_left| {
+                        for (atoms) |*a_right| {
+                            for (label_arr) |l_left| {
+                                for (sm_pds.alphabet) |gamma| {
+                                    const new_r_opt = try self.constructSMRuleGammaWithCheck(
+                                        r,
+                                        gamma,
+                                        r_name,
+                                        a_left,
+                                        a_right,
+                                        l_left,
+                                        lambda,
+                                    );
+                                    if (new_r_opt) |new_r| {
+                                        try self.storeRule(Rule{ .standard = new_r });
+                                        const new_r_sm = try self.constructSMRuleSM(r, r_name, a_right, l_left);
+                                        try self.storeRule(Rule{ .sm = new_r_sm });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+
     pub fn simplify(self: *@This(), inits: []const StateName) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();

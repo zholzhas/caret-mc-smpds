@@ -666,7 +666,7 @@ pub const SM_PDS_Processor = struct {
     symbols: SymbolProcessor,
     phase_names: PhaseProcessor,
 
-    phase_combiner: std.AutoHashMap(PhaseTriple, PhaseName),
+    phase_combiner: std.AutoArrayHashMap(PhaseTriple, PhaseName),
     phases: std.AutoArrayHashMap(PhaseName, void),
 
     system: ?SM_PDS,
@@ -682,7 +682,7 @@ pub const SM_PDS_Processor = struct {
             .states = StateProcessor.init(arena),
             .symbols = SymbolProcessor.init(arena),
             .phase_names = PhaseProcessor.init(arena),
-            .phase_combiner = std.AutoHashMap(PhaseTriple, PhaseName).init(gpa),
+            .phase_combiner = std.AutoArrayHashMap(PhaseTriple, PhaseName).init(gpa),
             .phases = std.AutoArrayHashMap(PhaseName, void).init(gpa),
         };
     }

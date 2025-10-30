@@ -250,6 +250,29 @@ pub const HeadReachabilityGraph = struct {
             std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
+        const PrevSM = struct {
+            old_sm: buchi.PhaseName,
+            new_sm: buchi.PhaseName,
+            res_phase: buchi.PhaseName,
+        };
+        var prev_phases = std.AutoHashMap(PrevSM, std.ArrayList(buchi.PhaseName)).init(self.gpa);
+        defer {
+            var it = prev_phases.iterator();
+            while (it.next()) |p| {
+                p.value_ptr.deinit();
+            }
+            prev_phases.deinit();
+        }
+
+        for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.keys(), self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.values()) |pt, res_p| {
+            const entr = try prev_phases.getOrPutValue(.{
+                .old_sm = pt.to_remove,
+                .new_sm = pt.to_add,
+                .res_phase = res_p,
+            }, std.ArrayList(buchi.PhaseName).init(self.gpa));
+            try entr.value_ptr.append(pt.original_phase);
+        }
+
         while (trans.popFirst()) |edge_node| {
             const edge = edge_node.data;
             self.gpa.destroy(edge_node);
@@ -290,42 +313,32 @@ pub const HeadReachabilityGraph = struct {
             // sm rules
             if (rules_by_tail.get(.{ .to = edge.from.st.state, .new_top = null })) |tail_rules| {
                 for (tail_rules.items) |r| {
-                    for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |prev_phase| {
+                    const prevs = prev_phases.get(.{
+                        .res_phase = edge.from.st.phase,
+                        .new_sm = r.sm.new_rules,
+                        .old_sm = r.sm.old_rules,
+                    }) orelse continue;
+                    for (prevs.items) |prev_phase| {
                         const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(prev_phase).?;
                         if (!phase.items.contains(r.sm.label)) {
                             continue;
                         }
-                        const candidate_phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.get(.{
-                            .original_phase = prev_phase,
-                            .to_remove = r.sm.old_rules,
-                            .to_add = r.sm.new_rules,
-                        }) orelse {
-                            continue;
-                            // std.debug.print("Try {}, {}, {}\nIn\n", .{ prev_phase, r.sm.old_rules, r.sm.new_rules });
-                            // var it = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.iterator();
-                            // while (it.next()) |entr| {
-                            //     std.debug.print("<{} -> {}>\n", .{ entr.key_ptr.*, entr.value_ptr.* });
-                            // }
-                            // unreachable;
-                        };
-                        if (candidate_phase == edge.from.st.phase) {
-                            const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
-                                .from = buchi.MA.Node{
-                                    .st = buchi.MA.StateNode{
-                                        .state = r.sm.from,
-                                        .phase = prev_phase,
-                                    },
+                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                            .from = buchi.MA.Node{
+                                .st = buchi.MA.StateNode{
+                                    .state = r.sm.from,
+                                    .phase = prev_phase,
                                 },
-                                .symbol = edge.symbol,
-                                .to = edge.to,
-                                .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
-                            });
-                            if (!trans_set.contains(edge_ptr)) {
-                                const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
-                                new_node.* = .{ .data = edge_ptr };
-                                trans.prepend(new_node);
-                                try trans_set.put(edge_ptr, {});
-                            }
+                            },
+                            .symbol = edge.symbol,
+                            .to = edge.to,
+                            .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
+                        });
+                        if (!trans_set.contains(edge_ptr)) {
+                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                            new_node.* = .{ .data = edge_ptr };
+                            trans.prepend(new_node);
+                            try trans_set.put(edge_ptr, {});
                         }
                     }
                 }
@@ -409,7 +422,8 @@ pub const HeadReachabilityGraph = struct {
         // ------------------------------
 
         if (root.state_initialized) {
-            std.log.info("Adding default hr edges: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+            std.log.info("Adding default hr edges ({} edges currently): {d:.3}s", .{ self.edges.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
+            std.log.info("Iterating over {} phases and {} rules ({} total)", .{ self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.count(), self.sm_bpds.rules.count(), self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.count() * self.sm_bpds.rules.count() });
         }
         for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
             const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(phase_name).?;
@@ -441,7 +455,7 @@ pub const HeadReachabilityGraph = struct {
             }
         }
         if (root.state_initialized) {
-            std.log.info("SM edges start: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+            std.log.info("SM edges start ({} edges currently): {d:.3}s", .{ self.edges.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
         }
 
         for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.keys()) |phase_name| {
