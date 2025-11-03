@@ -609,6 +609,10 @@ pub const HeadReachabilityGraph = struct {
             try gop.value_ptr.put(edge, {});
         }
 
+        if (root.state_initialized) {
+            std.log.info("source map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
+
         for (self.heads.values()) |head| {
             if (head.index == null) {
                 try self.strongconnect(gpa, head, &stack, &index, &sccs);
@@ -644,18 +648,33 @@ pub const HeadReachabilityGraph = struct {
             if (global_printer) |p| {
                 std.debug.print("Starting component from {}\n", .{p.node(head.*)});
             }
-            var heads = std.ArrayList(*const Head).init(gpa);
-            defer heads.deinit();
-            while (stack.pop()) |h| {
-                h.*.on_stack = false;
-                try heads.append(h);
 
-                if (h == head) break;
+            var heads_count: usize = 0;
+            if (stack.items.len > 0) {
+                var i = stack.items.len - 1;
+                while (i >= 0) : (i -= 1) {
+                    heads_count += 1;
+                    stack.items[i].*.on_stack = false;
+                    if (stack.items[i] == head) break;
+                }
             }
+            const head_items = try gpa.dupe(*Head, stack.items[stack.items.len - heads_count ..]);
+            errdefer gpa.free(head_items);
+            stack.shrinkRetainingCapacity(stack.items.len - heads_count);
+
+            // var heads = std.ArrayList(*const Head).init(gpa);
+            // defer heads.deinit();
+            // while (stack.pop()) |h| {
+            //     h.*.on_stack = false;
+            //     try heads.append(h);
+
+            //     if (h == head) break;
+            // }
 
             var accepting = false;
-            is_acc: for (heads.items) |h1| {
-                for (heads.items) |h2| {
+
+            is_acc: for (head_items) |h1| {
+                for (head_items) |h2| {
                     if (self.edges.contains(Edge{
                         .from = h1,
                         .label = true,
@@ -669,9 +688,11 @@ pub const HeadReachabilityGraph = struct {
 
             if (accepting) {
                 const scc = SCC{
-                    .heads = try heads.toOwnedSlice(),
+                    .heads = head_items,
                 };
                 try sccs.append(scc);
+            } else {
+                gpa.free(head_items);
             }
         }
     }
