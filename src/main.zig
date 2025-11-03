@@ -289,12 +289,11 @@ pub fn caret_model_check(
     if (state_initialized) {
         std.log.info("Tarjan finished {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
     }
-    var hr_ma = sm_bpds.MA.init(arena, gpa);
-    defer hr_ma.deinit();
 
-    try hr.build_hr_pre(&hr_ma, sccs);
+    const new_edges = try hr.build_hr_pre(gpa, &ma, sccs);
+    defer gpa.free(new_edges);
 
-    try hr_ma.saturate(&smb, true);
+    try hrg.appendSchwoon(new_edges);
     if (state_initialized) {
         std.log.info("Final MA constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
     } // std.debug.print("Pre(HG): {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
@@ -309,7 +308,7 @@ pub fn caret_model_check(
     for (atoms) |*atom| {
         if (!atom.set.contains(formula)) continue;
         if (!atom.calFormsEmpty()) continue;
-        res = res or try hr_ma.accepts(.{ .st = .{
+        res = res or try ma.accepts(.{ .st = .{
             .state = try smb.getStateName(.{ .counter = 0, .general = .{
                 .control_point = conf.state,
                 .atom = atom,
@@ -469,12 +468,11 @@ pub fn caret_model_check_no_opt(
     if (state_initialized) {
         std.log.info("Tarjan finished {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
     }
-    var hr_ma = sm_bpds.MA.init(arena, gpa);
-    defer hr_ma.deinit();
 
-    try hr.build_hr_pre(&hr_ma, sccs);
+    const new_edges = try hr.build_hr_pre(gpa, &ma, sccs);
+    defer gpa.free(new_edges);
 
-    try hr_ma.saturate(&smb, true);
+    try hrg.appendSchwoon(new_edges);
     if (state_initialized) {
         std.log.info("Final MA constructed {d:.3}s", .{@as(f64, @floatFromInt(state.timer.read())) / 1000000000});
     } // std.debug.print("Pre(HG): {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
@@ -489,7 +487,7 @@ pub fn caret_model_check_no_opt(
     for (atoms) |*atom| {
         if (!atom.set.contains(formula)) continue;
         if (!atom.calFormsEmpty()) continue;
-        res = res or try hr_ma.accepts(.{ .st = .{
+        res = res or try ma.accepts(.{ .st = .{
             .state = try smb.getStateName(.{ .counter = 0, .general = .{
                 .control_point = conf.state,
                 .atom = atom,
@@ -546,7 +544,10 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
             @as(f64, @floatFromInt(state.timer.read())) / 1000000000,
         });
     }
-    return caret_model_check_no_opt(gpa, arena, &proc, conf, formula, lambda);
+    return if (pytest)
+        caret_model_check_no_opt(gpa, arena, &proc, conf, formula, lambda)
+    else
+        caret_model_check(gpa, arena, &proc, conf, formula, lambda);
 }
 
 pub fn caret_model_check_smpds_file(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {

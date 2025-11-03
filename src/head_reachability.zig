@@ -480,6 +480,281 @@ pub const HeadReachabilityGraph = struct {
         }
     }
 
+    pub fn appendSchwoon(self: *@This(), new_edges: []const *const buchi.MA.Edge) !void {
+        defer {
+            var it = self.edges_by_trg.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+            self.edges_by_trg.clearAndFree();
+        }
+        //  rel = self.pre_ma
+
+        var trans = std.SinglyLinkedList(*const buchi.MA.Edge){};
+        defer {
+            while (trans.popFirst()) |n| {
+                self.gpa.destroy(n);
+            }
+        }
+        var trans_set = std.AutoHashMap(*const buchi.MA.Edge, void).init(self.gpa);
+        defer trans_set.deinit();
+
+        // delta_aux = self.edges
+
+        const RuleTail = struct {
+            to: buchi.StateName,
+            new_top: buchi.SymbolName, // null for self-modifying rules
+        };
+
+        var rules_by_tail = std.AutoHashMap(RuleTail, std.ArrayList(*const buchi.Rule)).init(self.gpa);
+        defer {
+            var it = rules_by_tail.iterator();
+            while (it.next()) |e| {
+                e.value_ptr.deinit();
+            }
+            rules_by_tail.deinit();
+        }
+
+        for (self.sm_bpds.rules.keys()) |*rule| {
+            switch (rule.*) {
+                .sm => |r| {
+                    const tail = RuleTail{
+                        .to = r.to,
+                        .new_top = r.top,
+                    };
+                    const gop = try rules_by_tail.getOrPut(tail);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = std.ArrayList(*const buchi.Rule).init(self.gpa);
+                    }
+                    try gop.value_ptr.append(rule);
+                },
+                .standard => |r| {
+                    if (r.new_top == null) continue;
+                    const tail = RuleTail{
+                        .to = r.to,
+                        .new_top = r.new_top.?,
+                    };
+                    const gop = try rules_by_tail.getOrPut(tail);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = std.ArrayList(*const buchi.Rule).init(self.gpa);
+                    }
+                    try gop.value_ptr.append(rule);
+                },
+            }
+        }
+
+        if (root.state_initialized) {
+            std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
+
+        for (new_edges) |edge_ptr| {
+            if (!trans_set.contains(edge_ptr)) {
+                const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                new_node.* = .{ .data = edge_ptr };
+                trans.prepend(new_node);
+                try trans_set.put(edge_ptr, {});
+            }
+        }
+
+        if (root.state_initialized) {
+            std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
+
+        const PrevSM = struct {
+            old_sm: buchi.PhaseName,
+            new_sm: buchi.PhaseName,
+            res_phase: buchi.PhaseName,
+        };
+        var prev_phases = std.AutoHashMap(PrevSM, std.ArrayList(buchi.PhaseName)).init(self.gpa);
+        defer {
+            var it = prev_phases.iterator();
+            while (it.next()) |p| {
+                p.value_ptr.deinit();
+            }
+            prev_phases.deinit();
+        }
+
+        for (self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.keys(), self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.values()) |pt, res_p| {
+            const entr = try prev_phases.getOrPutValue(.{
+                .old_sm = pt.to_remove,
+                .new_sm = pt.to_add,
+                .res_phase = res_p,
+            }, std.ArrayList(buchi.PhaseName).init(self.gpa));
+            try entr.value_ptr.append(pt.original_phase);
+        }
+
+        for (self.edges.values()) |edge_ptr| {
+            const edge = edge_ptr.*;
+            const gop = try self.edges_by_trg.getOrPut(edge.to);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.AutoArrayHashMap(*const Edge, void).init(self.gpa);
+            }
+            try gop.value_ptr.put(edge_ptr, {});
+        }
+
+        while (trans.popFirst()) |edge_node| {
+            const edge = edge_node.data;
+            self.gpa.destroy(edge_node);
+
+            if (!try self.pre_ma.addEdgePtr(edge)) {
+                continue;
+            }
+            switch (edge.from) {
+                .st => {},
+                .int => continue,
+            }
+
+            const hr_edges_opt = self.edges_by_trg.get(try self.addHead(Head{
+                .state = edge.from.st.state,
+                .phase = edge.from.st.phase,
+                .top = edge.symbol.symbol,
+            }));
+            if (hr_edges_opt) |hr_edges| {
+                for (hr_edges.keys()) |hr_edge| {
+                    const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                        .from = buchi.MA.Node{
+                            .st = buchi.MA.StateNode{
+                                .state = hr_edge.from.state,
+                                .phase = hr_edge.from.phase,
+                            },
+                        },
+                        .symbol = buchi.MA.EdgeSymbol{
+                            .symbol = hr_edge.from.top,
+                        },
+                        .to = edge.to,
+                        .accepting = edge.accepting or hr_edge.label,
+                    });
+                    if (!trans_set.contains(edge_ptr) and !self.pre_ma.edge_set.contains(edge_ptr)) {
+                        const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                        new_node.* = .{ .data = edge_ptr };
+                        trans.prepend(new_node);
+                        try trans_set.put(edge_ptr, {});
+                    }
+                }
+            }
+
+            if (rules_by_tail.get(.{ .to = edge.from.st.state, .new_top = edge.symbol.symbol })) |tail_rules| {
+                for (tail_rules.items) |r| {
+                    switch (r.*) {
+                        .sm => {
+                            const prevs = prev_phases.get(.{
+                                .res_phase = edge.from.st.phase,
+                                .new_sm = r.sm.new_rules,
+                                .old_sm = r.sm.old_rules,
+                            }) orelse continue;
+                            for (prevs.items) |prev_phase| {
+                                const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(prev_phase).?;
+                                if (!phase.items.contains(r.sm.label)) {
+                                    continue;
+                                }
+                                const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                                    .from = buchi.MA.Node{
+                                        .st = buchi.MA.StateNode{
+                                            .state = r.sm.from,
+                                            .phase = prev_phase,
+                                        },
+                                    },
+                                    .symbol = edge.symbol,
+                                    .to = edge.to,
+                                    .accepting = edge.accepting or self.sm_bpds.isAccepting(r.sm.from.*),
+                                });
+                                if (!trans_set.contains(edge_ptr) and !self.pre_ma.edge_set.contains(edge_ptr)) {
+                                    const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                    new_node.* = .{ .data = edge_ptr };
+                                    trans.prepend(new_node);
+                                    try trans_set.put(edge_ptr, {});
+                                }
+                            }
+                        },
+                        .standard => {
+                            const phase = self.sm_bpds.sm_gbpds.sm_pds_proc.?.phase_names.phase_values.get(edge.from.st.phase).?;
+                            if (!phase.items.contains(r.standard.label)) {
+                                continue;
+                            }
+                            if (r.standard.new_tail == null) {
+                                const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                                    .from = buchi.MA.Node{
+                                        .st = buchi.MA.StateNode{
+                                            .state = r.standard.from,
+                                            .phase = edge.from.st.phase,
+                                        },
+                                    },
+                                    .symbol = buchi.MA.EdgeSymbol{
+                                        .symbol = r.standard.top,
+                                    },
+                                    .to = edge.to,
+                                    .accepting = edge.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                });
+                                if (!trans_set.contains(edge_ptr) and !self.pre_ma.edge_set.contains(edge_ptr)) {
+                                    const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                    new_node.* = .{ .data = edge_ptr };
+                                    trans.prepend(new_node);
+                                    try trans_set.put(edge_ptr, {});
+                                }
+                            } else {
+                                const aux_edges_opt = self.pre_ma.edges_by_head.get(.{
+                                    .from = edge.to,
+                                    .symbol = buchi.MA.EdgeSymbol{ .symbol = r.standard.new_tail.? },
+                                });
+                                if (aux_edges_opt) |aux_edges| {
+                                    for (aux_edges.keys()) |edge_aux| {
+                                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                                            .from = buchi.MA.Node{
+                                                .st = buchi.MA.StateNode{
+                                                    .state = r.standard.from,
+                                                    .phase = edge.from.st.phase,
+                                                },
+                                            },
+                                            .symbol = buchi.MA.EdgeSymbol{
+                                                .symbol = r.standard.top,
+                                            },
+                                            .to = edge_aux.to,
+                                            .accepting = edge.accepting or edge_aux.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                        });
+                                        if (!trans_set.contains(edge_ptr) and !self.pre_ma.edge_set.contains(edge_ptr)) {
+                                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                            new_node.* = .{ .data = edge_ptr };
+                                            trans.prepend(new_node);
+                                            try trans_set.put(edge_ptr, {});
+                                        }
+                                    }
+                                }
+
+                                const aux_edges_opt_star = self.pre_ma.edges_by_head.get(.{
+                                    .from = edge.to,
+                                    .symbol = buchi.MA.EdgeSymbol{ .star = {} },
+                                });
+                                if (aux_edges_opt_star) |aux_edges| {
+                                    for (aux_edges.keys()) |edge_aux| {
+                                        const edge_ptr = try self.pre_ma.storeEdge(buchi.MA.Edge{
+                                            .from = buchi.MA.Node{
+                                                .st = buchi.MA.StateNode{
+                                                    .state = r.standard.from,
+                                                    .phase = edge.from.st.phase,
+                                                },
+                                            },
+                                            .symbol = buchi.MA.EdgeSymbol{
+                                                .symbol = r.standard.top,
+                                            },
+                                            .to = edge_aux.to,
+                                            .accepting = edge.accepting or edge_aux.accepting or self.sm_bpds.isAccepting(r.standard.from.*),
+                                        });
+                                        if (!trans_set.contains(edge_ptr) and !self.pre_ma.edge_set.contains(edge_ptr)) {
+                                            const new_node = try self.gpa.create(std.SinglyLinkedList(*const buchi.MA.Edge).Node);
+                                            new_node.* = .{ .data = edge_ptr };
+                                            trans.prepend(new_node);
+                                            try trans_set.put(edge_ptr, {});
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+
     pub fn construct(self: *@This()) !void {
         var path_arena = std.heap.ArenaAllocator.init(self.arena);
         defer path_arena.deinit();
@@ -758,20 +1033,31 @@ pub const HeadReachabilityGraph = struct {
     };
 };
 
-pub fn build_hr_pre(ma: *buchi.MA, sccs: []const HeadReachabilityGraph.SCC) !void {
+pub fn build_hr_pre(gpa: std.mem.Allocator, ma: *buchi.MA, sccs: []const HeadReachabilityGraph.SCC) ![]*const buchi.MA.Edge {
+    var count: usize = 0;
+
+    for (sccs) |scc| {
+        for (scc.heads) |_| {
+            count += 1;
+        }
+    }
+    const res = try gpa.alloc(*const buchi.MA.Edge, count + 1);
+
     const acc_node = buchi.MA.Node{
         .int = .{ .id = 0, .accepting = true },
     };
-    _ = try ma.addEdge(.{
+    res[0] = try ma.storeEdge(.{
         .from = acc_node,
         .to = acc_node,
         .accepting = false,
         .symbol = .{ .star = {} },
     });
 
+    var i: usize = 1;
+
     for (sccs) |scc| {
         for (scc.heads) |head| {
-            _ = try ma.addEdge(.{
+            res[i] = try ma.storeEdge(.{
                 .from = .{ .st = .{
                     .state = head.state,
                     .phase = head.phase,
@@ -780,6 +1066,8 @@ pub fn build_hr_pre(ma: *buchi.MA, sccs: []const HeadReachabilityGraph.SCC) !voi
                 .accepting = false,
                 .symbol = .{ .symbol = head.top },
             });
+            i += 1;
         }
     }
+    return res;
 }
