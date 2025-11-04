@@ -545,9 +545,9 @@ pub fn caret_model_check_unproc(gpa: std.mem.Allocator, arena: std.mem.Allocator
         });
     }
     return if (pytest)
-        caret_model_check_no_opt(gpa, arena, &proc, conf, formula, lambda)
+        try caret_model_check_no_opt(gpa, arena, &proc, conf, formula, lambda)
     else
-        caret_model_check(gpa, arena, &proc, conf, formula, lambda);
+        try caret_model_check(gpa, arena, &proc, conf, formula, lambda);
 }
 
 pub fn caret_model_check_smpds_file(gpa: std.mem.Allocator, arena: std.mem.Allocator, filename: []const u8) !bool {
@@ -618,7 +618,10 @@ pub fn caret_model_check_smpds_naive(gpa: std.mem.Allocator, arena: std.mem.Allo
     var lambda = try processor.LabellingFunction.init(gpa, &pds_proc, formula, processor.LabellingFunction.naive, pds.caret.valuations);
     defer lambda.deinit();
 
-    const res = try caret_model_check_no_opt(gpa, arena, &pds_proc, pds_conf, formula, lambda);
+    const res = if (pytest)
+        try caret_model_check_no_opt(gpa, arena, &pds_proc, pds_conf, formula, lambda)
+    else
+        try caret_model_check(gpa, arena, &pds_proc, pds_conf, formula, lambda);
 
     // std.debug.print("Total: {d:.3}s\n", .{@as(f64, @floatFromInt(timer.lap())) / 1000000000});
     return res;

@@ -417,6 +417,13 @@ pub const HeadReachabilityGraph = struct {
             }
         }
 
+        {
+            var it = self.edges_by_trg.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+            self.edges_by_trg.clearAndFree();
+        }
         // ------------------------------
 
         if (root.state_initialized) {
@@ -866,6 +873,14 @@ pub const HeadReachabilityGraph = struct {
 
     // Tarjan algo
     pub fn findRepeatingHeads(self: *@This(), gpa: std.mem.Allocator) ![]SCC {
+        defer {
+            var it = self.edges_by_src.iterator();
+            while (it.next()) |itt| {
+                itt.value_ptr.deinit();
+            }
+            self.edges_by_src.clearAndFree();
+        }
+
         var index: u32 = 0;
 
         var stack = std.ArrayList(*Head).init(gpa);

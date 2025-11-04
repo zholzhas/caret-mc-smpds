@@ -907,7 +907,7 @@ pub const SM_GBPDS_Processor = struct {
         a_right: AtomName,
         l_left: ExitLabel,
         lambda: processor.LabellingFunction,
-    ) !?StandardRule {
+    ) !?SMRule {
         if (!a_left.isTransition(.int)) return null;
 
         const s_left = r.from;
@@ -926,16 +926,15 @@ pub const SM_GBPDS_Processor = struct {
             .control_point = s_right,
             .atom = a_right,
             .label = l_left,
-            .sm_aux = r_name,
         });
 
-        return StandardRule{
+        return SMRule{
             .label = r_name,
             .from = new_from,
             .to = new_to,
             .top = try self.getSymbolName(Symbol{ .standard = gamma }),
-            .new_top = try self.getSymbolName(Symbol{ .standard = gamma }),
-            .new_tail = null,
+            .old_rules = r.old_phase,
+            .new_rules = r.new_phase,
         };
     }
 
@@ -1009,242 +1008,240 @@ pub const SM_GBPDS_Processor = struct {
         return accept_atoms;
     }
 
-    // pub fn construct_optimized(
-    //     self: *@This(),
-    //     sm_pds_proc: *const processor.SM_PDS_Processor,
-    //     atoms: []const Atom,
-    //     lambda: processor.LabellingFunction,
-    //     inits: []const StateName,
-    //     pre_ma: *const processor.MA,
-    // ) !void {
-    //     const sm_pds = sm_pds_proc.system.?;
-    //     const label_arr: []const ExitLabel = &.{ ExitLabel.exit, ExitLabel.unexit };
+    pub fn construct_optimized(
+        self: *@This(),
+        sm_pds_proc: *const processor.SM_PDS_Processor,
+        atoms: []const Atom,
+        lambda: processor.LabellingFunction,
+        inits: []const StateName,
+        pre_ma: *const processor.MA,
+    ) !void {
+        const sm_pds = sm_pds_proc.system.?;
+        const label_arr: []const ExitLabel = &.{ ExitLabel.exit, ExitLabel.unexit };
 
-    //     self.sm_pds_proc = sm_pds_proc;
+        self.sm_pds_proc = sm_pds_proc;
 
-    //     self.accept_atoms = try self.constructAcceptAtoms(atoms);
+        self.accept_atoms = try self.constructAcceptAtoms(atoms);
 
-    //     var rules_by_src = std.AutoHashMap(processor.State, std.ArrayList(usize)).init(self.gpa);
+        var rules_by_src = std.AutoHashMap(processor.State, std.ArrayList(usize)).init(self.gpa);
 
-    //     defer {
-    //         var it = rules_by_src.iterator();
-    //         while (it.next()) |k| {
-    //             k.value_ptr.deinit();
-    //         }
-    //         rules_by_src.deinit();
-    //     }
+        defer {
+            var it = rules_by_src.iterator();
+            while (it.next()) |k| {
+                k.value_ptr.deinit();
+            }
+            rules_by_src.deinit();
+        }
 
-    //     for (sm_pds.rules.items, 0..) |lr, i| {
-    //         const src = switch (lr.rule) {
-    //             .int => |r| r.from,
-    //             .call => |r| r.from,
-    //             .ret => |r| r.from,
-    //             .sm => |r| r.from,
-    //         };
-    //         const gop = try rules_by_src.getOrPut(src);
-    //         if (!gop.found_existing) {
-    //             gop.value_ptr.* = std.ArrayList(usize).init(self.gpa);
-    //         }
-    //         try gop.value_ptr.append(i);
-    //     }
+        for (sm_pds.rules.items, 0..) |lr, i| {
+            const src = switch (lr.rule) {
+                .int => |r| r.from,
+                .call => |r| r.from,
+                .ret => |r| r.from,
+                .sm => |r| r.from,
+            };
+            const gop = try rules_by_src.getOrPut(src);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(usize).init(self.gpa);
+            }
+            try gop.value_ptr.append(i);
+        }
 
-    //     var visited_states = std.AutoHashMap(StateName, void).init(self.gpa);
-    //     defer visited_states.deinit();
+        var visited_states = std.AutoHashMap(StateName, void).init(self.gpa);
+        defer visited_states.deinit();
 
-    //     var pushed_ret_symbols = std.AutoArrayHashMap(processor.Symbol, std.AutoArrayHashMap(SymbolName, void)).init(self.gpa);
-    //     defer {
-    //         for (pushed_ret_symbols.values()) |*v| {
-    //             v.deinit();
-    //         }
-    //         pushed_ret_symbols.deinit();
-    //     }
+        var pushed_ret_symbols = std.AutoArrayHashMap(processor.Symbol, std.AutoArrayHashMap(SymbolName, void)).init(self.gpa);
+        defer {
+            for (pushed_ret_symbols.values()) |*v| {
+                v.deinit();
+            }
+            pushed_ret_symbols.deinit();
+        }
 
-    //     const RetRuleInfo = struct {
-    //         to: StateName,
-    //         label: processor.RuleName,
-    //     };
+        const RetRuleInfo = struct {
+            to: StateName,
+            label: processor.RuleName,
+        };
 
-    //     var ret_rules = std.AutoArrayHashMap(processor.State, std.AutoArrayHashMap(RetRuleInfo, void)).init(self.gpa);
-    //     defer {
-    //         for (ret_rules.values()) |*v| {
-    //             v.deinit();
-    //         }
-    //         ret_rules.deinit();
-    //     }
+        var ret_rules = std.AutoArrayHashMap(processor.State, std.AutoArrayHashMap(RetRuleInfo, void)).init(self.gpa);
+        defer {
+            for (ret_rules.values()) |*v| {
+                v.deinit();
+            }
+            ret_rules.deinit();
+        }
 
-    //     var stack = std.ArrayList(StateName).init(self.gpa);
-    //     defer stack.deinit();
+        var stack = std.ArrayList(StateName).init(self.gpa);
+        defer stack.deinit();
 
-    //     var glnext_atoms = std.AutoHashMap(AtomName, std.ArrayList(AtomName)).init(self.gpa);
-    //     defer {
-    //         var it = glnext_atoms.iterator();
-    //         while (it.next()) |s| {
-    //             s.value_ptr.deinit();
-    //         }
-    //         glnext_atoms.deinit();
-    //     }
+        var glnext_atoms = std.AutoHashMap(AtomName, std.ArrayList(AtomName)).init(self.gpa);
+        defer {
+            var it = glnext_atoms.iterator();
+            while (it.next()) |s| {
+                s.value_ptr.deinit();
+            }
+            glnext_atoms.deinit();
+        }
 
-    //     var glabsnext_atoms = std.AutoHashMap(AtomName, std.ArrayList(AtomName)).init(self.gpa);
-    //     defer {
-    //         var it = glabsnext_atoms.iterator();
-    //         while (it.next()) |s| {
-    //             s.value_ptr.deinit();
-    //         }
-    //         glabsnext_atoms.deinit();
-    //     }
+        var glabsnext_atoms = std.AutoHashMap(AtomName, std.ArrayList(AtomName)).init(self.gpa);
+        defer {
+            var it = glabsnext_atoms.iterator();
+            while (it.next()) |s| {
+                s.value_ptr.deinit();
+            }
+            glabsnext_atoms.deinit();
+        }
 
-    //     for (atoms) |*a_left| {
-    //         const gop = try glnext_atoms.getOrPutValue(a_left, std.ArrayList(AtomName).init(self.gpa));
-    //         const gop2 = try glabsnext_atoms.getOrPutValue(a_left, std.ArrayList(AtomName).init(self.gpa));
-    //         for (atoms) |*a_right| {
-    //             if (a_left.glNext(a_right.*)) {
-    //                 try gop.value_ptr.append(a_right);
-    //             }
-    //             if (a_left.intNext(a_right.*)) {
-    //                 try gop2.value_ptr.append(a_right);
-    //             }
-    //         }
-    //     }
+        for (atoms) |*a_left| {
+            const gop = try glnext_atoms.getOrPutValue(a_left, std.ArrayList(AtomName).init(self.gpa));
+            const gop2 = try glabsnext_atoms.getOrPutValue(a_left, std.ArrayList(AtomName).init(self.gpa));
+            for (atoms) |*a_right| {
+                if (a_left.glNext(a_right.*)) {
+                    try gop.value_ptr.append(a_right);
+                }
+                if (a_left.intNext(a_right.*)) {
+                    try gop2.value_ptr.append(a_right);
+                }
+            }
+        }
 
-    //     if (root.state_initialized) {
-    //         std.log.info("GlNext construction finished: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
-    //     }
+        if (root.state_initialized) {
+            std.log.info("GlNext construction finished: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
+        }
 
-    //     for (inits) |ini| {
-    //         try stack.append(ini);
-    //     }
+        for (inits) |ini| {
+            try stack.append(ini);
+        }
 
-    //     while (stack.pop()) |cur| {
-    //         if (stack.capacity > stack.items.len * 3) {
-    //             stack.shrinkAndFree(stack.items.len);
-    //         }
-    //         if (visited_states.contains(cur)) {
-    //             continue;
-    //         }
-    //         try visited_states.putNoClobber(cur, {});
-    //         const st = cur.*;
-    //         const rules = rules_by_src.get(st.control_point) orelse continue;
-    //         for (rules.items) |lr_num| {
-    //             const lr = sm_pds.rules.items[lr_num];
-    //             const r_name = lr.label;
-    //             const rule = lr.rule;
-    //             switch (rule) {
-    //                 .call => |r| {
-    //                     for (glnext_atoms.get(st.atom).?.items) |a_right| {
-    //                         for (label_arr) |l_right| {
-    //                             const new_r_opt = try self.constructCallRule(
-    //                                 r,
-    //                                 r_name,
-    //                                 st.atom,
-    //                                 a_right,
-    //                                 st.label,
-    //                                 l_right,
-    //                                 lambda,
-    //                             );
-    //                             if (new_r_opt) |new_r| {
-    //                                 try self.storeRule(Rule{ .standard = new_r });
-    //                                 try stack.append(new_r.to);
-    //                                 const gop = try pushed_ret_symbols.getOrPutValue(new_r.new_tail.?.ret.symbol, std.AutoArrayHashMap(SymbolName, void).init(self.gpa));
-    //                                 try gop.value_ptr.put(new_r.new_tail.?, {});
-    //                             }
-    //                         }
-    //                     }
-    //                 },
-    //                 .int => |r| {
-    //                     for (glabsnext_atoms.get(st.atom).?.items) |a_right| {
-    //                         const new_r_opt = try self.constructIntRule(
-    //                             r,
-    //                             r_name,
-    //                             st.atom,
-    //                             a_right,
-    //                             st.label,
-    //                             lambda,
-    //                         );
-    //                         if (new_r_opt) |new_r| {
-    //                             try self.storeRule(Rule{ .standard = new_r });
-    //                             try stack.append(new_r.to);
-    //                         }
-    //                     }
-    //                 },
-    //                 .ret => |r| {
-    //                     for (glnext_atoms.get(st.atom).?.items) |a_right| {
-    //                         for (label_arr) |l_right| {
-    //                             const new_r_opt = try self.constructRetRulePop(
-    //                                 r,
-    //                                 r_name,
-    //                                 st.atom,
-    //                                 a_right,
-    //                                 l_right,
-    //                                 lambda,
-    //                             );
-    //                             if (new_r_opt) |new_r| {
-    //                                 try self.storeRule(Rule{ .standard = new_r });
-    //                                 try stack.append(new_r.to);
-    //                                 const gop = try ret_rules.getOrPutValue(new_r.to.control_point, std.AutoArrayHashMap(RetRuleInfo, void).init(self.gpa));
+        while (stack.pop()) |cur| {
+            if (stack.capacity > stack.items.len * 3) {
+                stack.shrinkAndFree(stack.items.len);
+            }
+            if (visited_states.contains(cur)) {
+                continue;
+            }
+            try visited_states.putNoClobber(cur, {});
+            const st = cur.*;
+            const rules = rules_by_src.get(st.control_point) orelse continue;
+            for (rules.items) |lr_num| {
+                const lr = sm_pds.rules.items[lr_num];
+                const r_name = lr.label;
+                const rule = lr.rule;
+                switch (rule) {
+                    .call => |r| {
+                        for (glnext_atoms.get(st.atom).?.items) |a_right| {
+                            for (label_arr) |l_right| {
+                                const new_r_opt = try self.constructCallRule(
+                                    r,
+                                    r_name,
+                                    st.atom,
+                                    a_right,
+                                    st.label,
+                                    l_right,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                    try stack.append(new_r.to);
+                                    const gop = try pushed_ret_symbols.getOrPutValue(new_r.new_tail.?.ret.symbol, std.AutoArrayHashMap(SymbolName, void).init(self.gpa));
+                                    try gop.value_ptr.put(new_r.new_tail.?, {});
+                                }
+                            }
+                        }
+                    },
+                    .int => |r| {
+                        for (glabsnext_atoms.get(st.atom).?.items) |a_right| {
+                            const new_r_opt = try self.constructIntRule(
+                                r,
+                                r_name,
+                                st.atom,
+                                a_right,
+                                st.label,
+                                lambda,
+                            );
+                            if (new_r_opt) |new_r| {
+                                try self.storeRule(Rule{ .standard = new_r });
+                                try stack.append(new_r.to);
+                            }
+                        }
+                    },
+                    .ret => |r| {
+                        for (glnext_atoms.get(st.atom).?.items) |a_right| {
+                            for (label_arr) |l_right| {
+                                const new_r_opt = try self.constructRetRulePop(
+                                    r,
+                                    r_name,
+                                    st.atom,
+                                    a_right,
+                                    l_right,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                    try stack.append(new_r.to);
+                                    const gop = try ret_rules.getOrPutValue(new_r.to.control_point, std.AutoArrayHashMap(RetRuleInfo, void).init(self.gpa));
 
-    //                                 try gop.value_ptr.put(.{ .to = new_r.to, .label = new_r.label }, {});
-    //                             }
-    //                         }
-    //                     }
-    //                 },
-    //                 .sm => |r| {
-    //                     for (glabsnext_atoms.get(st.atom).?.items) |a_right| {
-    //                         for (sm_pds.alphabet) |gamma| {
-    //                             const new_r_opt = try self.constructSMRuleGamma(
-    //                                 r,
-    //                                 gamma,
-    //                                 r_name,
-    //                                 st.atom,
-    //                                 a_right,
-    //                                 st.label,
-    //                                 lambda,
-    //                             );
-    //                             if (new_r_opt) |new_r| {
-    //                                 try self.storeRule(Rule{ .standard = new_r });
-    //                                 const new_r_sm = try self.constructSMRuleSM(r, r_name, a_right, st.label);
-    //                                 try self.storeRule(Rule{ .sm = new_r_sm });
-    //                                 try stack.append(new_r_sm.to);
-    //                             }
-    //                         }
-    //                     }
-    //                 },
-    //             }
-    //         }
-    //     }
+                                    try gop.value_ptr.put(.{ .to = new_r.to, .label = new_r.label }, {});
+                                }
+                            }
+                        }
+                    },
+                    .sm => |r| {
+                        for (glabsnext_atoms.get(st.atom).?.items) |a_right| {
+                            for (sm_pds.alphabet) |gamma| {
+                                const new_r_opt = try self.constructSMRuleGamma(
+                                    r,
+                                    gamma,
+                                    r_name,
+                                    st.atom,
+                                    a_right,
+                                    st.label,
+                                    lambda,
+                                );
+                                if (new_r_opt) |new_r_sm| {
+                                    try self.storeRule(Rule{ .sm = new_r_sm });
+                                    try stack.append(new_r_sm.to);
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
 
-    //     if (root.state_initialized) {
-    //         std.log.info("Constrution of normal rules finished ({} ret symbols and {} ret rules): {d:.3}s", .{
-    //             pushed_ret_symbols.count(),
-    //             ret_rules.count(),
-    //             @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000,
-    //         });
-    //     }
+        if (root.state_initialized) {
+            std.log.info("Constrution of normal rules finished ({} ret symbols and {} ret rules): {d:.3}s", .{
+                pushed_ret_symbols.count(),
+                ret_rules.count(),
+                @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000,
+            });
+        }
 
-    //     for (sm_pds.rules.items) |lr| {
-    //         switch (lr.rule) {
-    //             .call => |r| {
-    //                 var edge_it = pre_ma.edges_by_head.get(.{ .from = r.to, .symbol = r.new_top }) orelse continue;
-    //                 ret_loc_loop: while (edge_it.popFirst()) |edge_node| {
-    //                     const to_state = edge_node.data.to;
-    //                     for ((ret_rules.get(to_state) orelse continue :ret_loc_loop).keys()) |ret_rule| {
-    //                         for ((pushed_ret_symbols.get(r.new_tail) orelse continue :ret_loc_loop).keys()) |sym| {
-    //                             const new_r_decode_opt = try self.constructRetRuleDecode(
-    //                                 ret_rule.to,
-    //                                 ret_rule.label,
-    //                                 sym.ret,
-    //                                 lambda,
-    //                             );
-    //                             if (new_r_decode_opt) |new_r| {
-    //                                 try self.storeRule(Rule{ .standard = new_r });
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             },
-    //             else => {},
-    //         }
-    //     }
-    // }
+        for (sm_pds.rules.items) |lr| {
+            switch (lr.rule) {
+                .call => |r| {
+                    var edge_it = pre_ma.edges_by_head.get(.{ .from = r.to, .symbol = r.new_top }) orelse continue;
+                    ret_loc_loop: while (edge_it.popFirst()) |edge_node| {
+                        const to_state = edge_node.data.to;
+                        for ((ret_rules.get(to_state) orelse continue :ret_loc_loop).keys()) |ret_rule| {
+                            for ((pushed_ret_symbols.get(r.new_tail) orelse continue :ret_loc_loop).keys()) |sym| {
+                                const new_r_decode_opt = try self.constructRetRuleDecode(
+                                    ret_rule.to,
+                                    ret_rule.label,
+                                    sym.ret,
+                                    lambda,
+                                );
+                                if (new_r_decode_opt) |new_r| {
+                                    try self.storeRule(Rule{ .standard = new_r });
+                                }
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
 
     pub fn constructCallRuleWithCheck(
         self: *@This(),
