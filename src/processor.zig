@@ -2485,10 +2485,10 @@ test "regex to nfa 2" {
     var dfa = try nfa.determinize(gpa, &.{ "gamma1", "gamma2" });
     defer dfa.deinit();
 
-    for (dfa.edges.items) |e| {
-        std.debug.print("{} - {s} -> {}\n", .{ e.from, e.sym, e.to });
-    }
-    std.debug.print("Start: {}\n Finish: {any}\n", .{ dfa.start, dfa.finish.items });
+    // for (dfa.edges.items) |e| {
+    //     std.debug.print("{} - {s} -> {}\n", .{ e.from, e.sym, e.to });
+    // }
+    // std.debug.print("Start: {}\n Finish: {any}\n", .{ dfa.start, dfa.finish.items });
 }
 
 test "regex ap" {
