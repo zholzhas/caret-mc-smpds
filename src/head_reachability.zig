@@ -89,7 +89,7 @@ pub const HeadReachabilityGraph = struct {
     };
 
     fn addHead(self: *@This(), head: Head) !*const Head {
-        if (head.index != null) {
+        if (root.syscalls_enabled and head.index != null) {
             std.log.err("Cannot add edges after searching repeating heads!", .{});
             return HRErr.AddingEdgeAfterTarjan;
         }
@@ -201,7 +201,7 @@ pub const HeadReachabilityGraph = struct {
             }
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
@@ -246,7 +246,7 @@ pub const HeadReachabilityGraph = struct {
             }
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
@@ -426,7 +426,7 @@ pub const HeadReachabilityGraph = struct {
         }
         // ------------------------------
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Adding default hr edges ({} edges currently): {d:.3}s", .{ self.edges.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
             std.log.info("Iterating over {} phases and {} rules ({} total)", .{ self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.count(), self.sm_bpds.rules.count(), self.sm_bpds.sm_gbpds.sm_pds_proc.?.phases.count() * self.sm_bpds.rules.count() });
         }
@@ -482,7 +482,7 @@ pub const HeadReachabilityGraph = struct {
                 }
             }
         }
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Edges finish ({} edges and {} heads currently): {d:.3}s", .{ self.edges.count(), self.heads.count(), @as(f64, @floatFromInt(root.state.timer.read())) / 1000000000 });
         }
     }
@@ -550,7 +550,7 @@ pub const HeadReachabilityGraph = struct {
             }
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
@@ -563,7 +563,7 @@ pub const HeadReachabilityGraph = struct {
             }
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Rule map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
@@ -899,7 +899,7 @@ pub const HeadReachabilityGraph = struct {
             try gop.value_ptr.put(edge, {});
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("source map constructed: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
@@ -935,8 +935,8 @@ pub const HeadReachabilityGraph = struct {
         }
 
         if (head.*.lowlink.? == head.*.index.?) {
-            if (global_printer) |p| {
-                std.debug.print("Starting component from {}\n", .{p.node(head.*)});
+            if (root.syscalls_enabled and global_printer != null) {
+                std.debug.print("Starting component from {}\n", .{global_printer.?.node(head.*)});
             }
 
             var heads_count: usize = 0;
@@ -951,15 +951,6 @@ pub const HeadReachabilityGraph = struct {
             const head_items = try gpa.dupe(*Head, stack.items[stack.items.len - heads_count ..]);
             errdefer gpa.free(head_items);
             stack.shrinkRetainingCapacity(stack.items.len - heads_count);
-
-            // var heads = std.ArrayList(*const Head).init(gpa);
-            // defer heads.deinit();
-            // while (stack.pop()) |h| {
-            //     h.*.on_stack = false;
-            //     try heads.append(h);
-
-            //     if (h == head) break;
-            // }
 
             var accepting = false;
 

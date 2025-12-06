@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
         // only contains e.g. external object files, you can make this `null`.
         // In this case the main source file is merely a path, however, in more
         // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = if (target.result.os.tag == .freestanding) b.path("src/wasm_module.zig") else b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -43,6 +43,10 @@ pub fn build(b: *std.Build) void {
     // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("caret_mc_smpds_lib", lib_mod);
+
+    if (target.result.os.tag == .freestanding) {
+        exe_mod.export_symbol_names = &.{ "read_smpds", "alloc", "free" };
+    }
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -64,6 +68,12 @@ pub fn build(b: *std.Build) void {
         .name = "caret_mc_smpds",
         .root_module = exe_mod,
     });
+
+    if (target.result.os.tag == .freestanding) {
+        exe.entry = .disabled;
+        exe.import_symbols = true;
+        exe.export_table = true;
+    }
 
     const mecha = b.dependency("mecha", .{});
     exe.root_module.addImport("mecha", mecha.module("mecha"));

@@ -459,6 +459,28 @@ pub fn parseJsonFromPython(_: std.mem.Allocator, arena: std.mem.Allocator, filen
     };
 }
 
+pub fn parseString(arena: std.mem.Allocator, str: []const u8) union(enum) {
+    ok: ParsedSMPDS,
+    err: anyerror,
+    invalid_syntax: struct {
+        line: usize,
+        col: usize,
+    },
+} {
+    const sm_dpds_res: mecha.Result(ParsedSMPDS) = sm_pds_grammar.parse(arena, str) catch |e| return .{ .err = e };
+    switch (sm_dpds_res.value) {
+        .ok => |val| {
+            return .{ .ok = val };
+        },
+        .err => |_| {
+            const pos = getErrorPosition(str, sm_dpds_res.index);
+            return .{
+                .invalid_syntax = .{ .line = pos.line, .col = pos.col },
+            };
+        },
+    }
+}
+
 pub const RawCaret = union(enum) {
     ap: []const u8,
     top,
@@ -1404,6 +1426,8 @@ const sm_pds_grammar = mecha.combine(.{
     init_state_grammar,
     caret_grammar,
     SMPDSParser(sm_pds_rule_grammar.many(.{ .separator = ws })),
+    ws,
+    mecha.eos,
 }).map(struct {
     fn map(res: std.meta.Tuple(&.{ Conf, CaretLogic, SM_PDS })) ParsedSMPDS {
         return ParsedSMPDS{

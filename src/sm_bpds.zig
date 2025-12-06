@@ -474,9 +474,9 @@ pub const MA = struct {
         return false;
     }
 
-    pub var add_edge_time: usize = 0;
-    pub var path_time: usize = 0;
-    pub var sm_time: usize = 0;
+    // pub var add_edge_time: usize = 0;
+    // pub var path_time: usize = 0;
+    // pub var sm_time: usize = 0;
 
     fn saturateStep(self: *@This(), arena: std.mem.Allocator, sm_bpds: *const SM_BPDS_Processor, with_accept: bool) !usize {
         var path_arena = std.heap.ArenaAllocator.init(arena);
@@ -511,7 +511,7 @@ pub const MA = struct {
                         } else {
                             word_slice = word[0..0];
                         }
-                        var t = try std.time.Timer.start();
+                        // var t = try std.time.Timer.start();
                         const to_node = Node{ .st = StateNode{
                             .state = r.to,
                             .phase = phase_name,
@@ -523,7 +523,7 @@ pub const MA = struct {
 
                         const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
 
-                        path_time += t.lap();
+                        // path_time += t.lap();
                         for (paths) |p| {
                             const from_node = Node{ .st = StateNode{
                                 .state = r.from,
@@ -537,11 +537,11 @@ pub const MA = struct {
                             })) {
                                 edges_added += 1;
                             }
-                            add_edge_time += t.lap();
+                            // add_edge_time += t.lap();
                         }
                     },
                     .sm => |r| {
-                        var t = try std.time.Timer.start();
+                        // var t = try std.time.Timer.start();
                         const res_phase = sm_bpds.sm_gbpds.sm_pds_proc.?.phase_combiner.get(.{ .original_phase = phase_name, .to_add = r.new_rules, .to_remove = r.old_rules }) orelse continue :rule_loop;
                         const to_node = Node{ .st = StateNode{
                             .state = r.to,
@@ -566,7 +566,7 @@ pub const MA = struct {
                                 edges_added += 1;
                             }
                         }
-                        sm_time += t.lap();
+                        // sm_time += t.lap();
                     },
                 }
             }

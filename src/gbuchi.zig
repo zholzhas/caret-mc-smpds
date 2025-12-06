@@ -339,7 +339,6 @@ pub const Atom = struct {
         defer {
             visited.deinit();
         }
-        std.debug.print("", .{});
         var subsets: std.ArrayList(FormulaSet) = try getClosureSubsets(gpa, closure);
         defer {
             for (subsets.items) |*set| {
@@ -352,7 +351,6 @@ pub const Atom = struct {
             if (isAtom(set, closure)) {
                 var atom = Atom{ .set = set, .closure = closure };
                 if (visited.contains(atom)) continue;
-                // std.debug.print("{}\n", .{atom});
                 atom.set = try set.clone();
                 try visited.put(atom, {});
             }
@@ -974,7 +972,7 @@ pub const SM_GBPDS_Processor = struct {
         const gpa = self.gpa;
         var u_ops = std.ArrayList(Formula).init(gpa);
         defer u_ops.deinit();
-        if (atoms.len == 0) {
+        if (root.syscalls_enabled and atoms.len == 0) {
             std.log.err("Invalid closure and atoms!", .{});
             return error.OtherError;
         }
@@ -1105,7 +1103,7 @@ pub const SM_GBPDS_Processor = struct {
             }
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("GlNext construction finished: {d:.3}s", .{@as(f64, @floatFromInt(root.state.timer.read())) / 1000000000});
         }
 
@@ -1209,7 +1207,7 @@ pub const SM_GBPDS_Processor = struct {
             }
         }
 
-        if (root.state_initialized) {
+        if (root.syscalls_enabled and root.state_initialized) {
             std.log.info("Constrution of normal rules finished ({} ret symbols and {} ret rules): {d:.3}s", .{
                 pushed_ret_symbols.count(),
                 ret_rules.count(),

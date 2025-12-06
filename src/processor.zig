@@ -977,9 +977,9 @@ pub const MA = struct {
         return false;
     }
 
-    pub var add_edge_time: usize = 0;
-    pub var path_time: usize = 0;
-    pub var sm_time: usize = 0;
+    // pub var add_edge_time: usize = 0;
+    // pub var path_time: usize = 0;
+    // pub var sm_time: usize = 0;
 
     fn saturateStep(self: *@This(), arena: std.mem.Allocator, sm_pds: *const SM_PDS_Processor) !usize {
         var path_arena = std.heap.ArenaAllocator.init(arena);
@@ -1002,12 +1002,12 @@ pub const MA = struct {
                     } else {
                         word_slice = word[0..0];
                     }
-                    var t = try std.time.Timer.start();
+                    // var t = try std.time.Timer.start();
                     const to_node = r.to;
 
                     const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
 
-                    path_time += t.lap();
+                    // path_time += t.lap();
                     for (paths) |p| {
                         const from_node = r.from;
                         if (try self.addEdge(Edge{
@@ -1017,7 +1017,7 @@ pub const MA = struct {
                         })) {
                             edges_added += 1;
                         }
-                        add_edge_time += t.lap();
+                        // add_edge_time += t.lap();
                     }
                 },
                 .call => |r| {
@@ -1026,12 +1026,12 @@ pub const MA = struct {
                     var word_slice: []const Symbol = undefined;
                     word = .{ r.new_top, r.new_tail };
                     word_slice = &word;
-                    var t = try std.time.Timer.start();
+                    // var t = try std.time.Timer.start();
                     const to_node = r.to;
 
                     const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
 
-                    path_time += t.lap();
+                    // path_time += t.lap();
                     for (paths) |p| {
                         const from_node = r.from;
                         if (try self.addEdge(Edge{
@@ -1041,7 +1041,7 @@ pub const MA = struct {
                         })) {
                             edges_added += 1;
                         }
-                        add_edge_time += t.lap();
+                        // add_edge_time += t.lap();
                     }
                 },
                 .ret => |r| {
@@ -1049,12 +1049,12 @@ pub const MA = struct {
                     var word: [0]Symbol = undefined;
                     var word_slice: []const Symbol = undefined;
                     word_slice = word[0..0];
-                    var t = try std.time.Timer.start();
+                    // var t = try std.time.Timer.start();
                     const to_node = r.to;
 
                     const paths = try self.hasPath(path_arena.allocator(), to_node, word_slice);
 
-                    path_time += t.lap();
+                    // path_time += t.lap();
                     for (paths) |p| {
                         const from_node = r.from;
                         if (try self.addEdge(Edge{
@@ -1064,11 +1064,11 @@ pub const MA = struct {
                         })) {
                             edges_added += 1;
                         }
-                        add_edge_time += t.lap();
+                        // add_edge_time += t.lap();
                     }
                 },
                 .sm => |r| {
-                    var t = try std.time.Timer.start();
+                    // var t = try std.time.Timer.start();
                     const to_node = r.to;
                     var edges = self.edges_by_head.get(EdgeHead{
                         .from = to_node,
@@ -1085,7 +1085,7 @@ pub const MA = struct {
                             edges_added += 1;
                         }
                     }
-                    sm_time += t.lap();
+                    // sm_time += t.lap();
                 },
             }
         }
